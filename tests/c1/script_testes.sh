@@ -6,7 +6,7 @@
 #!/usr/bin/env bash
 set -u
 
-ROOT="/mnt/c/Arquivos/Faculdade/4_Year/PD/Trabalho"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 C1DIR="$ROOT/tests/c1"
 NODE="$ROOT/bin/node"
 CLIENT="$ROOT/bin/client"
