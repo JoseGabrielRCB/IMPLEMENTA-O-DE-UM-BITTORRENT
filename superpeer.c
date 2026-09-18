@@ -277,7 +277,7 @@ static void *atender_conexao(void *arg)
 
     if (receber_mensagem(conexao.socket, &msg) == 0) {
         node_id_to_hex(msg.header.no_origem, hex);
-        printf("RX %s de %s\n", nome_do_tipo(msg.header.tipo_mensagem), hex);
+        printf("RX %s payload=%u\n", nome_do_tipo(msg.header.tipo_mensagem), msg.header.tamanho_payload);
 
         switch (msg.header.tipo_mensagem) {
         case MSG_JOIN:

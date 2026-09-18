@@ -70,8 +70,8 @@ int main(int argc, char *argv[]) {
     if (node_init(&peer, &config) != 0) {
         return 1;
     }
-    node_print(&peer);
     
+
     peer.state = STATE_CONNECTING;
     int socket_fd = conectar_no_servidor(host, porta);
     if (socket_fd < 0) return 1;
@@ -121,7 +121,6 @@ int main(int argc, char *argv[]) {
             // o ACK do JOIN encerra o handshake
             if (msg.header.tipo_mensagem == MSG_JOIN && resposta.header.tipo_mensagem == MSG_ACK) {
                 peer.state = STATE_AUTHENTICATED;
-                printf("Estado: %s\n", node_state_name(peer.state));
             }
         }
         liberar_mensagem(&resposta);
