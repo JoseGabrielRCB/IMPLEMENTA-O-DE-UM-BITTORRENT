@@ -1,17 +1,18 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include <unistd.h>
 #include <pthread.h>
 
-#define NODE_ID_LEN 32
-#define NODE_ID_HEX_LEN 65
-#define NODE_IP_LEN 16
+#include "node.c"
+#include "network.c"
 
-int node_id_compare(const uint8_t a[NODE_ID_LEN], const uint8_t b[NODE_ID_LEN]);
-void node_id_to_hex(const uint8_t node_id[NODE_ID_LEN], char hex[NODE_ID_HEX_LEN]);
+/* Versao de protocolo aceita neste checkpoint */
+#define VERSAO_PROTOCOLO 1
 
 #define MAX_MEMBERS 64
 
@@ -163,4 +164,189 @@ void member_table_print(void)
     }
     member_print_table();
     pthread_mutex_unlock(&members_mutex);
+}
+
+/* Dados repassados para a thread de cada conexao */
+typedef struct {
+    int socket;
+    const Node *superpeer;
+} Conexao;
+
+/* Monta e envia uma resposta sem payload */
+static int responder(const Conexao *conexao, uint16_t tipo, const uint8_t destino[NODE_ID_LEN])
+{
+    Mensagem resposta;
+
+    memset(&resposta, 0, sizeof(resposta));
+    resposta.header.versao_protocolo = VERSAO_PROTOCOLO;
+    resposta.header.tipo_mensagem = tipo;
+    memcpy(resposta.header.no_origem, conexao->superpeer->node_id, NODE_ID_LEN);
+    memcpy(resposta.header.no_destino, destino, NODE_ID_LEN);
+    resposta.header.timestamp = (uint64_t)time(NULL);
+
+    return enviar_mensagem(conexao->socket, &resposta);
+}
+
+/* Le o endereco "ip:porta" que vem no payload do JOIN */
+static int ler_endereco(const Mensagem *msg, char *ip, size_t tamanho_ip, uint16_t *porta)
+{
+    char texto[32];
+    char *separador;
+    uint32_t tamanho = msg->header.tamanho_payload;
+
+    if (msg->payload == NULL || tamanho == 0 || tamanho >= sizeof(texto)) {
+        return -1;
+    }
+
+    memcpy(texto, msg->payload, tamanho);
+    texto[tamanho] = '\0';
+
+    separador = strchr(texto, ':');
+    if (separador == NULL) {
+        return -1;
+    }
+    *separador = '\0';
+
+    if (node_parse_ip(texto, ip, tamanho_ip) != 0) {
+        return -1;
+    }
+    return node_parse_port(separador + 1, porta);
+}
+
+/* Valida o JOIN, registra o no e responde */
+static void tratar_join(const Conexao *conexao, const Mensagem *msg)
+{
+    char ip[NODE_IP_LEN];
+    uint16_t porta;
+    int resultado;
+
+    if (msg->header.versao_protocolo != VERSAO_PROTOCOLO) {
+        printf("JOIN recusado: versao de protocolo %u\n", msg->header.versao_protocolo);
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    if (node_id_is_zero(msg->header.no_origem)) {
+        printf("JOIN recusado: NodeID zerado\n");
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    if (ler_endereco(msg, ip, sizeof(ip), &porta) != 0) {
+        printf("JOIN recusado: endereco invalido no payload\n");
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    resultado = member_table_add(msg->header.no_origem, ip, porta);
+    if (resultado == MEMBER_ERR_DUPLICATE) {
+        printf("JOIN: NodeID ja registrado, tabela inalterada\n");
+    } else if (resultado != MEMBER_OK) {
+        printf("JOIN recusado: nao foi possivel registrar\n");
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    responder(conexao, MSG_ACK, msg->header.no_origem);
+}
+
+/* Remove o no da tabela e responde */
+static void tratar_leave(const Conexao *conexao, const Mensagem *msg)
+{
+    if (member_table_remove(msg->header.no_origem) != MEMBER_OK) {
+        printf("LEAVE: NodeID nao estava na tabela\n");
+    }
+    responder(conexao, MSG_ACK, msg->header.no_origem);
+}
+
+/* Atende uma conexao aceita e encerra o socket */
+static void *atender_conexao(void *arg)
+{
+    Conexao conexao = *(Conexao *)arg;
+    Mensagem msg;
+    char hex[NODE_ID_HEX_LEN];
+
+    free(arg);
+    memset(&msg, 0, sizeof(msg));
+
+    if (receber_mensagem(conexao.socket, &msg) == 0) {
+        node_id_to_hex(msg.header.no_origem, hex);
+        printf("RX %s de %s\n", nome_do_tipo(msg.header.tipo_mensagem), hex);
+
+        switch (msg.header.tipo_mensagem) {
+        case MSG_JOIN:
+            tratar_join(&conexao, &msg);
+            break;
+        case MSG_LEAVE:
+            tratar_leave(&conexao, &msg);
+            break;
+        default:
+            printf("Tipo de mensagem fora do checkpoint 1\n");
+            responder(&conexao, MSG_ERROR, msg.header.no_origem);
+            break;
+        }
+    }
+
+    liberar_mensagem(&msg);
+    close(conexao.socket);
+    return NULL;
+}
+
+/* Sobe o super peer e atende uma conexao por thread */
+int main(int argc, char *argv[])
+{
+    NodeConfig config;
+    Node superpeer;
+    int servidor_fd;
+
+    /* buffer de linha para o log sair na hora quando redirecionado */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
+    if (node_parse_args(argc, argv, &config) != 0) {
+        node_print_usage(argv[0]);
+        return 1;
+    }
+    if (config.role != ROLE_SUPERPEER) {
+        fprintf(stderr, "Erro: este executavel so roda como superpeer\n");
+        return 1;
+    }
+    if (node_init(&superpeer, &config) != 0) {
+        return 1;
+    }
+    node_print(&superpeer);
+
+    servidor_fd = criar_servidor(superpeer.port);
+    if (servidor_fd < 0) {
+        fprintf(stderr, "Erro: nao foi possivel escutar na porta %u\n", superpeer.port);
+        return 1;
+    }
+    superpeer.state = STATE_CONNECTED;
+    printf("Escutando na porta %u\n", superpeer.port);
+
+    for (;;) {
+        Conexao *conexao;
+        pthread_t thread;
+        int cliente_fd = aceitar_cliente(servidor_fd);
+
+        if (cliente_fd < 0) {
+            continue;
+        }
+
+        conexao = (Conexao *)malloc(sizeof(Conexao));
+        if (conexao == NULL) {
+            close(cliente_fd);
+            continue;
+        }
+        conexao->socket = cliente_fd;
+        conexao->superpeer = &superpeer;
+
+        if (pthread_create(&thread, NULL, atender_conexao, conexao) != 0) {
+            fprintf(stderr, "Erro: nao foi possivel criar a thread\n");
+            free(conexao);
+            close(cliente_fd);
+            continue;
+        }
+        pthread_detach(thread);
+    }
+
+    close(servidor_fd);
+    return 0;
 }
