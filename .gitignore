@@ -5,3 +5,4 @@ bin/
 *.uuid
 tests/c1/test_protocol
 tests/c1/logs/*.log
+
