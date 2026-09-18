@@ -1,10 +1,46 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "superpeer.h"
-
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
+#include <time.h>
 #include <pthread.h>
+
+#define NODE_ID_LEN 32
+#define NODE_ID_HEX_LEN 65
+#define NODE_IP_LEN 16
+
+int node_id_compare(const uint8_t a[NODE_ID_LEN], const uint8_t b[NODE_ID_LEN]);
+void node_id_to_hex(const uint8_t node_id[NODE_ID_LEN], char hex[NODE_ID_HEX_LEN]);
+
+#define MAX_MEMBERS 64
+
+/* Retornos das operacoes da tabela */
+#define MEMBER_OK 0
+#define MEMBER_ERR_FULL (-1)
+#define MEMBER_ERR_DUPLICATE (-2)
+#define MEMBER_ERR_NOT_FOUND (-3)
+#define MEMBER_ERR_INVALID (-4)
+
+/* Estado do membro na tabela */
+typedef enum {
+    MEMBER_ALIVE
+} MemberState;
+
+/* Entrada da tabela de membros */
+typedef struct {
+    uint8_t node_id[NODE_ID_LEN];
+    char ip[NODE_IP_LEN];
+    uint16_t port;
+    MemberState state;
+    time_t last_heartbeat;
+    uint64_t version;
+} Member;
+
+int member_table_add(const uint8_t node_id[NODE_ID_LEN], const char *ip, uint16_t port);
+int member_table_contains(const uint8_t node_id[NODE_ID_LEN]);
+int member_table_remove(const uint8_t node_id[NODE_ID_LEN]);
+void member_table_print(void);
 
 /* Tabela de membros e o mutex que a protege */
 static Member members[MAX_MEMBERS];
