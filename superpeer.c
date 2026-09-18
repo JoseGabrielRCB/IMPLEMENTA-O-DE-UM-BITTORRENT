@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <pthread.h>
 
 #include "node.c"
@@ -13,6 +14,13 @@
 
 /* Versao de protocolo aceita neste checkpoint */
 #define VERSAO_PROTOCOLO 1
+
+/* Valores usados quando o no e iniciado pelas opcoes longas */
+#define IP_PADRAO "127.0.0.1"
+#define PORTA_PADRAO "55101"
+#define UUID_PADRAO "superpeer.uuid"
+#define NOME_PADRAO "superpeer"
+#define NOME_MAX 64
 
 #define MAX_MEMBERS 64
 
@@ -278,6 +286,9 @@ static void *atender_conexao(void *arg)
         case MSG_LEAVE:
             tratar_leave(&conexao, &msg);
             break;
+        case MSG_PING:
+            responder(&conexao, MSG_PONG, msg.header.no_origem);
+            break;
         default:
             printf("Tipo de mensagem fora do checkpoint 1\n");
             responder(&conexao, MSG_ERROR, msg.header.no_origem);
@@ -290,24 +301,85 @@ static void *atender_conexao(void *arg)
     return NULL;
 }
 
+/* Mostra os dois formatos de argumento aceitos */
+static void mostrar_uso(const char *programa)
+{
+    node_print_usage(programa);
+    fprintf(stderr, "  %s --port <porta> [--name <nome>] [--config <arquivo>]\n", programa);
+}
+
+/* Le a configuracao no formato de opcoes longas */
+static int ler_opcoes(int argc, char *argv[], NodeConfig *config, char *nome, size_t tamanho_nome)
+{
+    char porta[8];
+    int opt;
+    struct option longas[] = {
+        {"config", required_argument, 0, 'c'},
+        {"port", required_argument, 0, 'p'},
+        {"name", required_argument, 0, 'n'},
+        {0, 0, 0, 0}
+    };
+
+    memset(config, 0, sizeof(*config));
+    config->role = ROLE_SUPERPEER;
+    snprintf(porta, sizeof(porta), "%s", PORTA_PADRAO);
+    snprintf(nome, tamanho_nome, "%s", NOME_PADRAO);
+    snprintf(config->uuid_path, sizeof(config->uuid_path), "%s", UUID_PADRAO);
+
+    while ((opt = getopt_long(argc, argv, "c:p:n:", longas, NULL)) != -1) {
+        switch (opt) {
+        case 'c':
+            /* o arquivo de configuracao nao e usado neste checkpoint */
+            break;
+        case 'p':
+            snprintf(porta, sizeof(porta), "%s", optarg);
+            break;
+        case 'n':
+            snprintf(nome, tamanho_nome, "%s", optarg);
+            break;
+        default:
+            return -1;
+        }
+    }
+
+    if (node_parse_ip(IP_PADRAO, config->ip, sizeof(config->ip)) != 0) {
+        return -1;
+    }
+    if (node_parse_port(porta, &config->port) != 0) {
+        fprintf(stderr, "Erro: porta invalida: %s\n", porta);
+        return -1;
+    }
+    return 0;
+}
+
 /* Sobe o super peer e atende uma conexao por thread */
 int main(int argc, char *argv[])
 {
     NodeConfig config;
     Node superpeer;
+    char nome[NOME_MAX];
     int servidor_fd;
 
     /* buffer de linha para o log sair na hora quando redirecionado */
     setvbuf(stdout, NULL, _IOLBF, 0);
 
-    if (node_parse_args(argc, argv, &config) != 0) {
-        node_print_usage(argv[0]);
+    snprintf(nome, sizeof(nome), "%s", NOME_PADRAO);
+
+    /* o primeiro argumento diz qual dos dois formatos foi usado */
+    if (argc > 1 && argv[1][0] != '-') {
+        if (node_parse_args(argc, argv, &config) != 0) {
+            mostrar_uso(argv[0]);
+            return 1;
+        }
+        if (config.role != ROLE_SUPERPEER) {
+            fprintf(stderr, "Erro: este executavel so roda como superpeer\n");
+            return 1;
+        }
+    } else if (ler_opcoes(argc, argv, &config, nome, sizeof(nome)) != 0) {
+        mostrar_uso(argv[0]);
         return 1;
     }
-    if (config.role != ROLE_SUPERPEER) {
-        fprintf(stderr, "Erro: este executavel so roda como superpeer\n");
-        return 1;
-    }
+
     if (node_init(&superpeer, &config) != 0) {
         return 1;
     }
@@ -319,6 +391,7 @@ int main(int argc, char *argv[])
         return 1;
     }
     superpeer.state = STATE_CONNECTED;
+    printf("Node %s started\n", nome);
     printf("Escutando na porta %u\n", superpeer.port);
 
     for (;;) {
