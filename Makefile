@@ -1,7 +1,7 @@
 # compilador e parametros
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -pthread
-LDLIBS = -lcrypto
+LDLIBS = -lcrypto -llz4
 
 # regras principais
 all: bin/superpeer bin/peer bin/node bin/client
@@ -11,7 +11,7 @@ bin:
 	mkdir -p bin
 
 # compila o super peer (servidor)
-bin/superpeer: superpeer.c node.c network.c protocol.c | bin
+bin/superpeer: superpeer.c node.c metadata.c network.c protocol.c | bin
 	$(CC) $(CFLAGS) -o bin/superpeer superpeer.c $(LDLIBS)
 
 # compila o peer (antigo client.c)
