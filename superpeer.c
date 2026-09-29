@@ -10,6 +10,7 @@
 #include <pthread.h>
 
 #include "node.c"
+#include "metadata.c"
 #include "network.c"
 
 /* Versao de protocolo aceita neste checkpoint */
@@ -180,8 +181,10 @@ typedef struct {
     const Node *superpeer;
 } Conexao;
 
-/* Monta e envia uma resposta sem payload */
-static int responder(const Conexao *conexao, uint16_t tipo, const uint8_t destino[NODE_ID_LEN])
+/* Monta e envia uma resposta com payload opcional */
+static int responder_com_payload(const Conexao *conexao, uint16_t tipo,
+                                 const uint8_t destino[NODE_ID_LEN],
+                                 uint8_t *payload, uint32_t tamanho)
 {
     Mensagem resposta;
 
@@ -191,8 +194,16 @@ static int responder(const Conexao *conexao, uint16_t tipo, const uint8_t destin
     memcpy(resposta.header.no_origem, conexao->superpeer->node_id, NODE_ID_LEN);
     memcpy(resposta.header.no_destino, destino, NODE_ID_LEN);
     resposta.header.timestamp = (uint64_t)time(NULL);
+    resposta.header.tamanho_payload = tamanho;
+    resposta.payload = payload;
 
     return enviar_mensagem(conexao->socket, &resposta);
+}
+
+/* Monta e envia uma resposta sem payload */
+static int responder(const Conexao *conexao, uint16_t tipo, const uint8_t destino[NODE_ID_LEN])
+{
+    return responder_com_payload(conexao, tipo, destino, NULL, 0);
 }
 
 /* Le o endereco "ip:porta" que vem no payload do JOIN */
@@ -265,6 +276,105 @@ static void tratar_leave(const Conexao *conexao, const Mensagem *msg)
     responder(conexao, MSG_ACK, msg->header.no_origem);
 }
 
+/* Validacao comum de STORE e LOOKUP */
+static int validar_origem(const Mensagem *msg, const char *tipo)
+{
+    if (msg->header.versao_protocolo != VERSAO_PROTOCOLO) {
+        printf("%s recusado: versao de protocolo %u\n", tipo, msg->header.versao_protocolo);
+        return -1;
+    }
+    if (node_id_is_zero(msg->header.no_origem)) {
+        printf("%s recusado: NodeID zerado\n", tipo);
+        return -1;
+    }
+    /* decisao: so aceita STORE e LOOKUP de nos que ja fizeram JOIN */
+    if (!member_table_contains(msg->header.no_origem)) {
+        printf("%s recusado: NodeID nao esta na tabela de membros\n", tipo);
+        return -1;
+    }
+    return 0;
+}
+
+/* Desserializa, valida e registra o metadado recebido */
+static void tratar_store(const Conexao *conexao, const Mensagem *msg)
+{
+    FileMetadata meta;
+    int resultado;
+
+    if (validar_origem(msg, "STORE") != 0) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    if (metadata_deserialize(msg->payload, msg->header.tamanho_payload, &meta) != METADATA_OK) {
+        printf("STORE recusado: metadado invalido no payload\n");
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    if (metadata_check_chunks(&meta) != METADATA_OK) {
+        printf("STORE recusado: chunk_count nao bate com o tamanho\n");
+        metadata_free(&meta);
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    /* o dono e quem enviou e a versao comeca em 1 */
+    memcpy(meta.owner, msg->header.no_origem, NODE_ID_LEN);
+    meta.version = 1;
+
+    resultado = metadata_table_insert(&meta);
+    metadata_free(&meta);
+
+    if (resultado == METADATA_ERR_NAME_TAKEN) {
+        printf("STORE recusado: nome ja usado por outro ObjectID\n");
+    } else if (resultado == METADATA_ERR_FULL) {
+        printf("STORE recusado: tabela de metadados cheia\n");
+    } else if (resultado != METADATA_OK) {
+        printf("STORE recusado: nao foi possivel registrar\n");
+    }
+    responder(conexao, (resultado == METADATA_OK) ? MSG_ACK : MSG_ERROR, msg->header.no_origem);
+}
+
+/* Busca o metadado pelo nome e devolve serializado */
+static void tratar_lookup(const Conexao *conexao, const Mensagem *msg)
+{
+    char nome[METADATA_NAME_LEN];
+    uint32_t tamanho = msg->header.tamanho_payload;
+    FileMetadata meta;
+    uint8_t *payload = NULL;
+    uint32_t tamanho_payload = 0;
+
+    if (validar_origem(msg, "LOOKUP") != 0) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    if (msg->payload == NULL || tamanho == 0 || tamanho > METADATA_NAME_MAX ||
+        memchr(msg->payload, '\0', tamanho) != NULL) {
+        printf("LOOKUP recusado: nome invalido no payload\n");
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    memcpy(nome, msg->payload, tamanho);
+    nome[tamanho] = '\0';
+
+    if (metadata_table_find_by_name(nome, &meta) != METADATA_OK) {
+        printf("LOOKUP: arquivo %s nao encontrado\n", nome);
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    if (metadata_serialize(&meta, &payload, &tamanho_payload) != METADATA_OK) {
+        printf("LOOKUP: nao foi possivel serializar o metadado\n");
+        metadata_free(&meta);
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    printf("LOOKUP: arquivo %s encontrado\n", nome);
+    responder_com_payload(conexao, MSG_ACK, msg->header.no_origem, payload, tamanho_payload);
+    free(payload);
+    metadata_free(&meta);
+}
+
 /* Atende uma conexao aceita e encerra o socket */
 static void *atender_conexao(void *arg)
 {
@@ -289,8 +399,14 @@ static void *atender_conexao(void *arg)
         case MSG_PING:
             responder(&conexao, MSG_PONG, msg.header.no_origem);
             break;
+        case MSG_STORE:
+            tratar_store(&conexao, &msg);
+            break;
+        case MSG_LOOKUP:
+            tratar_lookup(&conexao, &msg);
+            break;
         default:
-            printf("Tipo de mensagem fora do checkpoint 1\n");
+            printf("Tipo de mensagem nao suportado\n");
             responder(&conexao, MSG_ERROR, msg.header.no_origem);
             break;
         }
