@@ -181,3 +181,8 @@ Rodando assim, o resultado e `PASS: 10` e `FAIL: 0`.
 - O Super Peer roda ate receber `Ctrl+C`.
 - A pasta `tests/c1/logs/` precisa existir: e para onde o script do professor
   manda o log do servidor.
+
+
+# Checkpoint 2
+
+⚠️ Ponto de Atenção para o Professor: Como nós adicionamos o LZ4 neste Checkpoint, a máquina de quem for compilar precisa ter as bibliotecas instaladas (assim como instalamos no seu WSL antes). O comando de pré-requisito no Ubuntu/WSL é: sudo apt-get install build-essential libssl-dev liblz4-dev
