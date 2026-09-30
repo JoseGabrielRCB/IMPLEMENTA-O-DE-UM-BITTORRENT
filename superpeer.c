@@ -499,7 +499,7 @@ int main(int argc, char *argv[])
     if (node_init(&superpeer, &config) != 0) {
         return 1;
     }
-    node_print(&superpeer);
+    // node_print removido para limpar o terminal
 
     servidor_fd = criar_servidor(superpeer.port);
     if (servidor_fd < 0) {

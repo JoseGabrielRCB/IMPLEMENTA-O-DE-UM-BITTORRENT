@@ -1,12 +1,12 @@
 # CHECKPOINT 1
-## Para compilar todos os executaveis do projeto:
+### Para compilar todos os executaveis do projeto:
     "make clean"
     "make"
 
-## Para rodar os testes enviador do checkpoint 1:
+### Para rodar os testes enviador do checkpoint 1:
     "bash tests/c1/script_testes.sh"
 
-## Para testar a comunicacao manualmente:
+### Para testar a comunicacao manualmente:
     Servidor (superpeer), Inicia o noh que ficara escutando as requisicoes na porta 55101:
         "./bin/superpeer superpeer 127.0.0.1 55101 sp.uuid"
 
@@ -21,6 +21,6 @@
 ### Para LZ4 neste Checkpoint, a máquina precisa ter as bibliotecas instaladas: 
     sudo apt-get install build-essential libssl-dev liblz4-dev
 
-
-./bin/peer upload arquivo.pdf (Explique que este comando passa pela esteira: SHA-256 global -> Lê blocos de 4MB -> Comprime LZ4 -> Hasheia bloco a bloco -> Salva no Banco de Dados).
-./bin/peer download arquivo.pdf (Explique que atualmente ele valida apenas a interceptação do comando).
+### para realizar o upload primeiro o join para estabelecer a conexao
+    ./bin/peer upload arquivo.pdf 
+    ./bin/peer download arquivo.pdf 
