@@ -161,6 +161,16 @@ int main(int argc, char *argv[])
         }
     }
 
+    if (optind < argc) {
+        if (strcmp(argv[optind], "upload") == 0 && optind + 1 < argc) {
+            snprintf(cmd, sizeof(cmd), "upload");
+            snprintf(file_param, sizeof(file_param), "%s", argv[optind + 1]);
+        } else if (strcmp(argv[optind], "download") == 0 && optind + 1 < argc) {
+            snprintf(cmd, sizeof(cmd), "download");
+            snprintf(name_param, sizeof(name_param), "%s", argv[optind + 1]);
+        }
+    }
+
     if (strcmp(cmd, "upload") == 0)
     {
         if (strlen(file_param) > 0)
