@@ -138,6 +138,23 @@ int member_table_contains(const uint8_t node_id[NODE_ID_LEN])
     return encontrado;
 }
 
+int member_table_get_provider_info(const uint8_t node_id[NODE_ID_LEN], ProviderInfo *info)
+{
+    int indice;
+    if (pthread_mutex_lock(&members_mutex) != 0) {
+        return MEMBER_ERR_INVALID;
+    }
+    indice = member_find_index(node_id);
+    if (indice < 0) {
+        pthread_mutex_unlock(&members_mutex);
+        return MEMBER_ERR_NOT_FOUND;
+    }
+    snprintf(info->ip, sizeof(info->ip), "%s", members[indice].ip);
+    info->port = members[indice].port;
+    pthread_mutex_unlock(&members_mutex);
+    return MEMBER_OK;
+}
+
 /* Remove um membro da tabela */
 int member_table_remove(const uint8_t node_id[NODE_ID_LEN])
 {
@@ -322,6 +339,9 @@ static void tratar_store(const Conexao *conexao, const Mensagem *msg)
     meta.version = 1;
 
     resultado = metadata_table_insert(&meta);
+    if (resultado == METADATA_OK) {
+        metadata_add_provider(meta.object_id, msg->header.no_origem);
+    }
     metadata_free(&meta);
 
     if (resultado == METADATA_ERR_NAME_TAKEN) {
@@ -369,8 +389,33 @@ static void tratar_lookup(const Conexao *conexao, const Mensagem *msg)
         return;
     }
 
-    printf("LOOKUP: arquivo %s encontrado\n", nome);
-    responder_com_payload(conexao, MSG_ACK, msg->header.no_origem, payload, tamanho_payload);
+    uint8_t providers[10][32];
+    int p_count = 0;
+    metadata_get_providers(meta.object_id, providers, &p_count);
+    
+    uint32_t real_p_count = 0;
+    ProviderInfo p_infos[10];
+    for (int i = 0; i < p_count; i++) {
+        if (member_table_get_provider_info(providers[i], &p_infos[real_p_count]) == MEMBER_OK) {
+            real_p_count++;
+        }
+    }
+    
+    uint32_t final_payload_size = tamanho_payload + sizeof(uint32_t) + (real_p_count * sizeof(ProviderInfo));
+    uint8_t *final_payload = malloc(final_payload_size);
+    if (final_payload) {
+        memcpy(final_payload, payload, tamanho_payload);
+        memcpy(final_payload + tamanho_payload, &real_p_count, sizeof(uint32_t));
+        if (real_p_count > 0) {
+            memcpy(final_payload + tamanho_payload + sizeof(uint32_t), p_infos, real_p_count * sizeof(ProviderInfo));
+        }
+        printf("LOOKUP: arquivo %s encontrado (%u provedores)\n", nome, real_p_count);
+        responder_com_payload(conexao, MSG_ACK, msg->header.no_origem, final_payload, final_payload_size);
+        free(final_payload);
+    } else {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+    }
+
     free(payload);
     metadata_free(&meta);
 }
@@ -499,7 +544,7 @@ int main(int argc, char *argv[])
     if (node_init(&superpeer, &config) != 0) {
         return 1;
     }
-    node_print(&superpeer);
+    // node_print removido para limpar o terminal
 
     servidor_fd = criar_servidor(superpeer.port);
     if (servidor_fd < 0) {

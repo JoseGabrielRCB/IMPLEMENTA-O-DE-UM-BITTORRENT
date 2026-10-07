@@ -27,11 +27,19 @@ typedef enum {
     MSG_PONG = 20
 } TipoMensagem;
 
+// Estrutura para trafegar dados de IP e Porta dos pares
+typedef struct __attribute__((packed)) {
+    char ip[16];
+    uint16_t port;
+} ProviderInfo;
+
 // converte id do comando para texto legivel nos logs
 const char* nome_do_tipo(uint16_t tipo) {
     switch(tipo) {
         case MSG_JOIN: return "JOIN";
         case MSG_LEAVE: return "LEAVE";
+        case MSG_LOOKUP: return "LOOKUP";
+        case MSG_STORE: return "STORE";
         case MSG_PING: return "PING";
         case MSG_PONG: return "PONG";
         case MSG_ACK: return "ACK";

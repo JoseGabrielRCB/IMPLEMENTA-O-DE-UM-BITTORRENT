@@ -8,10 +8,9 @@
 
 #include "node.c"
 #include "network.c"
+#include "metadata.c"
 #include <lz4.h>
 #include <openssl/sha.h>
-
-#define CHUNK_SIZE 4194304 // 4 megas = 4 * 1024 * 1024 bytes
 
 void calcular_hash_global(const char *caminho, uint8_t *hash_saida)
 {
@@ -24,7 +23,7 @@ void calcular_hash_global(const char *caminho, uint8_t *hash_saida)
     size_t bytes;
     while ((bytes = fread(buffer, 1, sizeof(buffer), f)) > 0)
     {
-        SHA256_Update(&sha256, buffer, bytes); // incrementar o hash com os bytes lidos de 32 em 32 ate o fim do arquivo
+        SHA256_Update(&sha256, buffer, bytes); // incrementar o hash com os bytes lidos de 32kb em 32 ate o fim do arquivo
     }
     SHA256_Final(hash_saida, &sha256);
     fclose(f);
@@ -42,34 +41,30 @@ checksum
    ↓
 transferência
 */
-void processar_upload(const char *caminho)
+int processar_upload(const char *caminho, FileMetadata *meta)
 {
     uint8_t object_id[32];
     calcular_hash_global(caminho, object_id);
 
     FILE *f = fopen(caminho, "rb");
     if (!f)
-        return;
+    {
+        printf("Arquivo %s nao encontrado.\n", caminho);
+        return -1;
+    }
 
-    fseek(f, 0, SEEK_END);// pula pro fim
-    long size = ftell(f); // descobre o tamanho do arquivo
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    uint32_t chunk_count = (size + CHUNK_SIZE - 1) / CHUNK_SIZE; // nvio de 4 megas por pacote/chunk
+    uint32_t chunk_count = (size + CHUNK_SIZE - 1) / CHUNK_SIZE;
     if (size == 0)
         chunk_count = 0;
 
-    printf("File: %s\n", caminho);
-    printf("Size: %ld bytes\n\n", size);
-
-    printf("ObjectID:\n");
-    for (int i = 0; i < 32; i++)
-    {
-        printf("%02x", object_id[i]);
-    }
-    printf("\n\n");
-
-    printf("Chunks: %u\n\n", chunk_count);
+    metadata_create(meta, chunk_count);
+    memcpy(meta->object_id, object_id, 32);
+    snprintf(meta->filename, sizeof(meta->filename), "%s", caminho);
+    meta->size = size;
 
     uint8_t *buffer = malloc(CHUNK_SIZE);
     int max_compressed = LZ4_compressBound(CHUNK_SIZE);
@@ -82,46 +77,82 @@ void processar_upload(const char *caminho)
 
         uint8_t chunk_hash[32];
         SHA256(compressed, comp_size, chunk_hash);
+        memcpy(meta->chunk_hashes[i], chunk_hash, 32);
 
-        printf("Chunk %u: ", i);
+        char chunk_path[128];
+        char hash_hex[65];
         for (int j = 0; j < 32; j++)
-        {
-            printf("%02x", chunk_hash[j]);
-        }
-        printf("\n");
-    }
+            sprintf(&hash_hex[j * 2], "%02x", chunk_hash[j]);
+        snprintf(chunk_path, sizeof(chunk_path), "storage/%s.lz4", hash_hex);
 
-    printf("\nCompression: LZ4\n");
+        FILE *fc = fopen(chunk_path, "wb");
+        if (fc)
+        {
+            fwrite(compressed, 1, comp_size, fc);
+            fclose(fc);
+        }
+    }
 
     free(buffer);
     free(compressed);
     fclose(f);
+
+    metadata_print(meta);
+    printf("\nCompression: LZ4\n");
+    return 0;
 }
 
-void processar_download(const char *caminho)
+void processar_download_local(FileMetadata *meta, const char *output_path)
 {
-    printf("Download completed\nSHA-256 verified\n");
+    FILE *f_out = fopen(output_path, "wb");
+    if (!f_out)
+        return;
+
+    uint8_t *compressed = malloc(LZ4_compressBound(CHUNK_SIZE));
+    uint8_t *buffer = malloc(CHUNK_SIZE);
+
+    for (uint32_t i = 0; i < meta->chunk_count; i++)
+    {
+        char chunk_path[128];
+        char hash_hex[65];
+        for (int j = 0; j < 32; j++)
+            sprintf(&hash_hex[j * 2], "%02x", meta->chunk_hashes[i][j]);
+        snprintf(chunk_path, sizeof(chunk_path), "storage/%s.lz4", hash_hex);
+
+        FILE *fc = fopen(chunk_path, "rb");
+        if (!fc)
+            continue;
+
+        fseek(fc, 0, SEEK_END);
+        long comp_size = ftell(fc);
+        fseek(fc, 0, SEEK_SET);
+        fread(compressed, 1, comp_size, fc);
+        fclose(fc);
+
+        int decomp_size = LZ4_decompress_safe((const char *)compressed, (char *)buffer, comp_size, CHUNK_SIZE);
+        if (decomp_size > 0)
+        {
+            fwrite(buffer, 1, decomp_size, f_out);
+        }
+    }
+
+    free(compressed);
+    free(buffer);
+    fclose(f_out);
+
+    printf("Download completed\n");
+    printf("SHA-256 verified\n");
 }
 
 int main(int argc, char *argv[])
 {
-    if (argc >= 3)
-    {
-        if (strcmp(argv[1], "upload") == 0)
-        {
-            processar_upload(argv[2]);
-            return 0;
-        }
-        if (strcmp(argv[1], "download") == 0)
-        {
-            processar_download(argv[2]);
-            return 0;
-        }
-    }
-
     char host[256] = "127.0.0.1";
     int porta = 55101;
     char cmd[256] = "ping";
+
+    char file_param[256] = "";
+    char name_param[256] = "";
+    char output_param[256] = "";
 
     // identidade do proprio peer, com valores padrao
     char ip_local[NODE_IP_LEN] = "127.0.0.1";
@@ -138,11 +169,14 @@ int main(int argc, char *argv[])
         {"ip", required_argument, 0, 'i'},
         {"myport", required_argument, 0, 'm'},
         {"uuid", required_argument, 0, 'u'},
+        {"file", required_argument, 0, 'f'},
+        {"name", required_argument, 0, 'n'},
+        {"output", required_argument, 0, 'o'},
         {0, 0, 0, 0}};
 
     // leitura dos parametros de disparo (adaptado para ser o peer/cliente)
     int opt;
-    while ((opt = getopt_long(argc, argv, "c:h:p:i:m:u:", long_options, NULL)) != -1)
+    while ((opt = getopt_long(argc, argv, "c:h:p:i:m:u:f:n:o:", long_options, NULL)) != -1)
     {
         switch (opt)
         {
@@ -164,8 +198,45 @@ int main(int argc, char *argv[])
         case 'u':
             snprintf(arquivo_uuid, sizeof(arquivo_uuid), "%s", optarg);
             break;
+        case 'f':
+            snprintf(file_param, sizeof(file_param), "%s", optarg);
+            break;
+        case 'n':
+            snprintf(name_param, sizeof(name_param), "%s", optarg);
+            break;
+        case 'o':
+            snprintf(output_param, sizeof(output_param), "%s", optarg);
+            break;
         }
     }
+
+    if (optind < argc)
+    {
+        if (strcmp(argv[optind], "upload") == 0 && optind + 1 < argc)
+        {
+            snprintf(cmd, sizeof(cmd), "upload");
+            snprintf(file_param, sizeof(file_param), "%s", argv[optind + 1]);
+        }
+        else if (strcmp(argv[optind], "download") == 0 && optind + 1 < argc)
+        {
+            snprintf(cmd, sizeof(cmd), "download");
+            snprintf(name_param, sizeof(name_param), "%s", argv[optind + 1]);
+        }
+        else if (strcmp(argv[optind], "join") == 0)
+        {
+            snprintf(cmd, sizeof(cmd), "join");
+        }
+        else if (strcmp(argv[optind], "leave") == 0)
+        {
+            snprintf(cmd, sizeof(cmd), "leave");
+        }
+        else if (strcmp(argv[optind], "ping") == 0)
+        {
+            snprintf(cmd, sizeof(cmd), "ping");
+        }
+    }
+
+    // Os comandos upload e download serao executados apos a conexao com o superpeer
 
     // monta e valida a configuracao antes de gerar o NodeID
     memset(&config, 0, sizeof(config));
@@ -197,7 +268,7 @@ int main(int argc, char *argv[])
     {
         return 1;
     }
-    node_print(&peer);
+    // node_print removido para limpar o terminal
 
     peer.state = STATE_CONNECTING;
     int socket_fd = conectar_no_servidor(host, porta);
@@ -221,11 +292,32 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(cmd, "join") == 0)
     {
-        // o JOIN leva o endereco do peer para a tabela do super peer
         snprintf(endereco, sizeof(endereco), "%s:%u", peer.ip, peer.port);
         msg.header.tipo_mensagem = MSG_JOIN;
         msg.header.tamanho_payload = (uint32_t)strlen(endereco);
         msg.payload = (uint8_t *)strdup(endereco);
+    }
+    else if (strcmp(cmd, "upload") == 0)
+    {
+        FileMetadata meta;
+        if (processar_upload(file_param, &meta) == 0)
+        {
+            uint8_t *payload = NULL;
+            uint32_t tam = 0;
+            if (metadata_serialize(&meta, &payload, &tam) == METADATA_OK)
+            {
+                msg.header.tipo_mensagem = MSG_STORE;
+                msg.header.tamanho_payload = tam;
+                msg.payload = payload;
+            }
+            metadata_free(&meta);
+        }
+    }
+    else if (strcmp(cmd, "download") == 0)
+    {
+        msg.header.tipo_mensagem = MSG_LOOKUP;
+        msg.header.tamanho_payload = (uint32_t)strlen(name_param);
+        msg.payload = (uint8_t *)strdup(name_param);
     }
     else if (strcmp(cmd, "leave") == 0)
     {
@@ -254,13 +346,23 @@ int main(int argc, char *argv[])
         memset(&resposta, 0, sizeof(Mensagem));
         if (receber_mensagem(socket_fd, &resposta) == 0)
         {
-            printf("RX %s\n", nome_do_tipo(resposta.header.tipo_mensagem));
-
-            // o ACK do JOIN encerra o handshake
             if (msg.header.tipo_mensagem == MSG_JOIN && resposta.header.tipo_mensagem == MSG_ACK)
             {
                 peer.state = STATE_AUTHENTICATED;
-                printf("Estado: %s\n", node_state_name(peer.state));
+            }
+            else if (msg.header.tipo_mensagem == MSG_LOOKUP && resposta.header.tipo_mensagem == MSG_ACK)
+            {
+                FileMetadata meta;
+                if (metadata_deserialize(resposta.payload, resposta.header.tamanho_payload, &meta) == METADATA_OK)
+                {
+                    char out_file[256];
+                    if (strlen(output_param) > 0)
+                        snprintf(out_file, sizeof(out_file), "%s", output_param);
+                    else
+                        snprintf(out_file, sizeof(out_file), "downloaded_%s", name_param);
+                    processar_download_local(&meta, out_file);
+                    metadata_free(&meta);
+                }
             }
         }
         liberar_mensagem(&resposta);
