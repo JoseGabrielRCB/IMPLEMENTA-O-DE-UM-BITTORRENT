@@ -24,3 +24,6 @@
 ### para realizar o upload primeiro o join para estabelecer a conexao
     ./bin/peer upload arquivo.pdf 
     ./bin/peer download arquivo.pdf 
+
+### o arquivo baixado e salvo como downloaded_<nome>, ou no caminho passado em --output
+    ./bin/peer download arquivo.pdf --output saida.pdf
