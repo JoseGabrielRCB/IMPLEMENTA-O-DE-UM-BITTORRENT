@@ -16,6 +16,7 @@
 #include "network.c"
 #include "metadata.c"
 #include "chord.c"
+#include "gossip.c"
 
 /* Valores usados quando o no e iniciado pelas opcoes longas */
 #define IP_PADRAO "127.0.0.1"
@@ -51,6 +52,7 @@ typedef struct {
 int member_table_add(const uint8_t node_id[NODE_ID_LEN], const char *ip, uint16_t port);
 int member_table_contains(const uint8_t node_id[NODE_ID_LEN]);
 int member_table_remove(const uint8_t node_id[NODE_ID_LEN]);
+int member_table_get_provider_info(const uint8_t node_id[NODE_ID_LEN], ProviderInfo *info);
 void member_table_print(void);
 
 /* Tabela de membros e o mutex que a protege */
@@ -137,6 +139,29 @@ int member_table_contains(const uint8_t node_id[NODE_ID_LEN])
 
     pthread_mutex_unlock(&members_mutex);
     return encontrado;
+}
+
+/* Copia IP e porta do membro para o ProviderInfo */
+int member_table_get_provider_info(const uint8_t node_id[NODE_ID_LEN], ProviderInfo *info)
+{
+    int indice;
+
+    if (node_id == NULL || info == NULL) {
+        return MEMBER_ERR_INVALID;
+    }
+    if (pthread_mutex_lock(&members_mutex) != 0) {
+        return MEMBER_ERR_INVALID;
+    }
+    indice = member_find_index(node_id);
+    if (indice < 0) {
+        pthread_mutex_unlock(&members_mutex);
+        return MEMBER_ERR_NOT_FOUND;
+    }
+    memset(info, 0, sizeof(*info));
+    snprintf(info->ip, sizeof(info->ip), "%s", members[indice].ip);
+    info->port = members[indice].port;
+    pthread_mutex_unlock(&members_mutex);
+    return MEMBER_OK;
 }
 
 /* Remove um membro da tabela */
@@ -323,6 +348,9 @@ static void tratar_store(const Conexao *conexao, const Mensagem *msg)
     meta.version = 1;
 
     resultado = metadata_table_insert(&meta);
+    if (resultado == METADATA_OK) {
+        metadata_add_provider(meta.object_id, msg->header.no_origem);
+    }
     metadata_free(&meta);
 
     if (resultado == METADATA_ERR_NAME_TAKEN) {
@@ -333,6 +361,46 @@ static void tratar_store(const Conexao *conexao, const Mensagem *msg)
         printf("STORE recusado: nao foi possivel registrar\n");
     }
     responder(conexao, (resultado == METADATA_OK) ? MSG_ACK : MSG_ERROR, msg->header.no_origem);
+}
+
+/* Responde o LOOKUP com o metadado seguido de count + ProviderInfo de cada provedor */
+static void tratar_lookup_responder(const Conexao *conexao, const Mensagem *msg, const char *nome,
+                                    const FileMetadata *meta, const uint8_t *payload,
+                                    uint32_t tamanho_payload)
+{
+    uint8_t providers[MAX_PROVIDERS][32];
+    ProviderInfo p_infos[MAX_PROVIDERS];
+    uint32_t real_p_count = 0;
+    uint32_t final_payload_size;
+    uint8_t *final_payload;
+    int p_count = 0;
+    int i;
+
+    if (metadata_get_providers(meta->object_id, providers, &p_count) != METADATA_OK) {
+        p_count = 0;
+    }
+    for (i = 0; i < p_count && i < MAX_PROVIDERS; i++) {
+        if (member_table_get_provider_info(providers[i], &p_infos[real_p_count]) == MEMBER_OK) {
+            real_p_count++;
+        }
+    }
+
+    final_payload_size = tamanho_payload + (uint32_t)sizeof(uint32_t) +
+                         real_p_count * (uint32_t)sizeof(ProviderInfo);
+    final_payload = (uint8_t *)malloc(final_payload_size);
+    if (final_payload == NULL) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    memcpy(final_payload, payload, tamanho_payload);
+    memcpy(final_payload + tamanho_payload, &real_p_count, sizeof(uint32_t));
+    if (real_p_count > 0) {
+        memcpy(final_payload + tamanho_payload + sizeof(uint32_t), p_infos,
+               real_p_count * sizeof(ProviderInfo));
+    }
+    printf("LOOKUP: arquivo %s encontrado (%u provedores)\n", nome, real_p_count);
+    responder_com_payload(conexao, MSG_ACK, msg->header.no_origem, final_payload, final_payload_size);
+    free(final_payload);
 }
 
 /* Busca o metadado pelo nome e devolve serializado */
@@ -370,13 +438,12 @@ static void tratar_lookup(const Conexao *conexao, const Mensagem *msg)
         return;
     }
 
-    printf("LOOKUP: arquivo %s encontrado\n", nome);
-    responder_com_payload(conexao, MSG_ACK, msg->header.no_origem, payload, tamanho_payload);
+    tratar_lookup_responder(conexao, msg, nome, &meta, payload, tamanho_payload);
     free(payload);
     metadata_free(&meta);
 }
 
-/* Validacao comum das mensagens do Chord */
+/* Validacao comum das mensagens entre Super Peers */
 static int validar_chord(const Mensagem *msg)
 {
     const char *tipo = nome_do_tipo(msg->header.tipo_mensagem);
@@ -440,6 +507,34 @@ static void tratar_chord(const Conexao *conexao, const Mensagem *msg)
                           (tamanho_resposta > 0) ? payload : NULL, tamanho_resposta);
 }
 
+/* Trata HEARTBEAT e GOSSIP entre Super Peers */
+static void tratar_gossip(const Conexao *conexao, const Mensagem *msg)
+{
+    uint8_t *tabela = NULL;
+    uint32_t tamanho_tabela = 0;
+    int resultado;
+
+    if (validar_chord(msg) != 0) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    if (msg->header.tipo_mensagem == MSG_HEARTBEAT) {
+        resultado = gossip_handle_heartbeat(msg->payload, msg->header.tamanho_payload);
+    } else {
+        resultado = gossip_handle_gossip(msg->payload, msg->header.tamanho_payload,
+                                         &tabela, &tamanho_tabela);
+    }
+
+    if (resultado != 0) {
+        printf("%s recusado: payload invalido\n", nome_do_tipo(msg->header.tipo_mensagem));
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    responder_com_payload(conexao, MSG_ACK, msg->header.no_origem, tabela, tamanho_tabela);
+    free(tabela);
+}
+
 /* Atende uma conexao aceita e encerra o socket */
 static void *atender_conexao(void *arg)
 {
@@ -476,6 +571,10 @@ static void *atender_conexao(void *arg)
         case MSG_CHORD_LOOKUP:
         case MSG_TOPOLOGY:
             tratar_chord(&conexao, &msg);
+            break;
+        case MSG_HEARTBEAT:
+        case MSG_GOSSIP:
+            tratar_gossip(&conexao, &msg);
             break;
         default:
             printf("Tipo de mensagem nao suportado\n");
@@ -660,6 +759,11 @@ int main(int argc, char *argv[])
 
     if (chord_start(&superpeer, nome, config.superpeer_ip, config.superpeer_port) != 0) {
         fprintf(stderr, "Erro: nao foi possivel iniciar o Chord\n");
+        close(servidor_fd);
+        return 1;
+    }
+    if (gossip_start(&superpeer, nome, config.superpeer_ip, config.superpeer_port) != 0) {
+        fprintf(stderr, "Erro: nao foi possivel iniciar o Gossip\n");
         close(servidor_fd);
         return 1;
     }

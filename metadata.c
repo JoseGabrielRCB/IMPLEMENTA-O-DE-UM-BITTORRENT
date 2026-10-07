@@ -37,10 +37,14 @@ typedef struct {
     uint8_t   owner[32];
 } FileMetadata;
 
+#define MAX_PROVIDERS 10
+
 /* Entrada da tabela principal, indexada pelo ObjectID */
 typedef struct {
     int used;
     FileMetadata meta;
+    uint8_t providers[MAX_PROVIDERS][32];
+    int provider_count;
 } MetadataSlot;
 
 /* Entrada do indice por nome, leva o nome ao ObjectID */
@@ -66,6 +70,9 @@ int metadata_table_insert(const FileMetadata *meta);
 int metadata_table_find_by_id(const uint8_t object_id[METADATA_ID_LEN], FileMetadata *out);
 int metadata_table_find_by_name(const char *filename, FileMetadata *out);
 void metadata_table_print(void);
+
+int metadata_add_provider(const uint8_t object_id[METADATA_ID_LEN], const uint8_t node_id[32]);
+int metadata_get_providers(const uint8_t object_id[METADATA_ID_LEN], uint8_t out_providers[][32], int *count);
 
 /* Tabelas de metadados e o mutex que protege as duas */
 static MetadataSlot metadata_slots[MAX_FILES];
@@ -529,6 +536,7 @@ int metadata_table_insert(const FileMetadata *meta)
 
     if (resultado == METADATA_OK) {
         metadata_slots[livre_id].used = 1;
+        metadata_slots[livre_id].provider_count = 0;
         metadata_names[livre_nome].used = 1;
         snprintf(metadata_names[livre_nome].filename, METADATA_NAME_LEN, "%s",
                  metadata_slots[livre_id].meta.filename);
@@ -617,4 +625,75 @@ void metadata_table_print(void)
     }
 
     pthread_mutex_unlock(&metadata_mutex);
+}
+
+/* Adiciona um NodeID (provedor) para o arquivo associado ao object_id */
+int metadata_add_provider(const uint8_t object_id[METADATA_ID_LEN], const uint8_t node_id[32])
+{
+    int indice;
+    int i;
+    
+    if (object_id == NULL || node_id == NULL) {
+        return METADATA_ERR_INVALID;
+    }
+    
+    if (pthread_mutex_lock(&metadata_mutex) != 0) {
+        return METADATA_ERR_INVALID;
+    }
+    
+    indice = metadata_find_id_index(object_id);
+    if (indice < 0) {
+        pthread_mutex_unlock(&metadata_mutex);
+        return METADATA_ERR_NOT_FOUND;
+    }
+    
+    /* Verifica se ja existe na lista */
+    for (i = 0; i < metadata_slots[indice].provider_count; i++) {
+        if (memcmp(metadata_slots[indice].providers[i], node_id, 32) == 0) {
+            pthread_mutex_unlock(&metadata_mutex);
+            return METADATA_OK;
+        }
+    }
+    
+    /* Adiciona se houver espaco */
+    if (metadata_slots[indice].provider_count < MAX_PROVIDERS) {
+        memcpy(metadata_slots[indice].providers[metadata_slots[indice].provider_count], node_id, 32);
+        metadata_slots[indice].provider_count++;
+    } else {
+        /* Lista cheia */
+        pthread_mutex_unlock(&metadata_mutex);
+        return METADATA_ERR_FULL;
+    }
+    
+    pthread_mutex_unlock(&metadata_mutex);
+    return METADATA_OK;
+}
+
+/* Recupera a lista de provedores de um arquivo */
+int metadata_get_providers(const uint8_t object_id[METADATA_ID_LEN], uint8_t out_providers[][32], int *count)
+{
+    int indice;
+    int i;
+    
+    if (object_id == NULL || out_providers == NULL || count == NULL) {
+        return METADATA_ERR_INVALID;
+    }
+    
+    if (pthread_mutex_lock(&metadata_mutex) != 0) {
+        return METADATA_ERR_INVALID;
+    }
+    
+    indice = metadata_find_id_index(object_id);
+    if (indice < 0) {
+        pthread_mutex_unlock(&metadata_mutex);
+        return METADATA_ERR_NOT_FOUND;
+    }
+    
+    *count = metadata_slots[indice].provider_count;
+    for (i = 0; i < metadata_slots[indice].provider_count; i++) {
+        memcpy(out_providers[i], metadata_slots[indice].providers[i], 32);
+    }
+    
+    pthread_mutex_unlock(&metadata_mutex);
+    return METADATA_OK;
 }

@@ -32,6 +32,12 @@ typedef enum {
     MSG_TOPOLOGY = 25
 } TipoMensagem;
 
+// Estrutura para trafegar dados de IP e Porta dos pares
+typedef struct __attribute__((packed)) {
+    char ip[16];
+    uint16_t port;
+} ProviderInfo;
+
 // converte id do comando para texto legivel nos logs
 const char* nome_do_tipo(uint16_t tipo) {
     switch(tipo) {
@@ -43,6 +49,8 @@ const char* nome_do_tipo(uint16_t tipo) {
         case MSG_PONG: return "PONG";
         case MSG_ACK: return "ACK";
         case MSG_ERROR: return "ERROR";
+        case MSG_HEARTBEAT: return "HEARTBEAT";
+        case MSG_GOSSIP: return "GOSSIP";
         case MSG_FIND_SUCCESSOR: return "FIND_SUCCESSOR";
         case MSG_GET_PREDECESSOR: return "GET_PREDECESSOR";
         case MSG_NOTIFY: return "NOTIFY";

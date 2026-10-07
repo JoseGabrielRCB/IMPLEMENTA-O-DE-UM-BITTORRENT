@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <ctype.h>
 
 #include "node.c"
 #include "network.c"
@@ -144,6 +145,57 @@ void processar_download_local(FileMetadata *meta, const char *output_path)
     printf("SHA-256 verified\n");
 }
 
+// separa o metadado da lista de provedores (count + ProviderInfo) no fim da resposta do LOOKUP
+int separar_provedores(const uint8_t *payload, uint32_t tamanho, uint32_t *tamanho_meta)
+{
+    uint16_t nome_len;
+    uint32_t chunk_count;
+    uint32_t provedores;
+    uint64_t pos;
+    uint64_t fim;
+
+    if (payload == NULL || tamanho < METADATA_ID_LEN + sizeof(uint16_t))
+        return -1;
+    memcpy(&nome_len, payload + METADATA_ID_LEN, sizeof(uint16_t));
+    pos = (uint64_t)METADATA_ID_LEN + sizeof(uint16_t) + nome_len + sizeof(uint64_t);
+    if (pos + sizeof(uint32_t) > tamanho)
+        return -1;
+    memcpy(&chunk_count, payload + pos, sizeof(uint32_t));
+    pos += sizeof(uint32_t) + (uint64_t)chunk_count * METADATA_HASH_LEN + sizeof(uint64_t) + METADATA_ID_LEN;
+    if (pos + sizeof(uint32_t) > tamanho)
+        return -1;
+    memcpy(&provedores, payload + pos, sizeof(uint32_t));
+    fim = pos + sizeof(uint32_t) + (uint64_t)provedores * sizeof(ProviderInfo);
+    if (fim != tamanho)
+        return -1;
+
+    for (uint32_t i = 0; i < provedores; i++)
+    {
+        ProviderInfo info;
+        memcpy(&info, payload + pos + sizeof(uint32_t) + i * sizeof(ProviderInfo), sizeof(info));
+        info.ip[sizeof(info.ip) - 1] = '\0';
+        printf("Provedor: %s:%u\n", info.ip, info.port);
+    }
+    *tamanho_meta = (uint32_t)pos;
+    return 0;
+}
+
+// converte o ObjectID de 64 caracteres hex para 32 bytes
+int ler_object_id(const char *hex, uint8_t object_id[NODE_ID_LEN])
+{
+    if (strlen(hex) != NODE_ID_LEN * 2)
+        return -1;
+    for (int i = 0; i < NODE_ID_LEN; i++)
+    {
+        unsigned int byte;
+        if (!isxdigit((unsigned char)hex[2 * i]) || !isxdigit((unsigned char)hex[2 * i + 1]) ||
+            sscanf(hex + 2 * i, "%2x", &byte) != 1)
+            return -1;
+        object_id[i] = (uint8_t)byte;
+    }
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     char host[256] = "127.0.0.1";
@@ -153,6 +205,8 @@ int main(int argc, char *argv[])
     char file_param[256] = "";
     char name_param[256] = "";
     char output_param[256] = "";
+    char object_id_param[256] = "";
+    uint8_t object_id[NODE_ID_LEN];
 
     // identidade do proprio peer, com valores padrao
     char ip_local[NODE_IP_LEN] = "127.0.0.1";
@@ -172,11 +226,12 @@ int main(int argc, char *argv[])
         {"file", required_argument, 0, 'f'},
         {"name", required_argument, 0, 'n'},
         {"output", required_argument, 0, 'o'},
+        {"object-id", required_argument, 0, 'x'},
         {0, 0, 0, 0}};
 
     // leitura dos parametros de disparo (adaptado para ser o peer/cliente)
     int opt;
-    while ((opt = getopt_long(argc, argv, "c:h:p:i:m:u:f:n:o:", long_options, NULL)) != -1)
+    while ((opt = getopt_long(argc, argv, "c:h:p:i:m:u:f:n:o:x:", long_options, NULL)) != -1)
     {
         switch (opt)
         {
@@ -206,6 +261,9 @@ int main(int argc, char *argv[])
             break;
         case 'o':
             snprintf(output_param, sizeof(output_param), "%s", optarg);
+            break;
+        case 'x':
+            snprintf(object_id_param, sizeof(object_id_param), "%s", optarg);
             break;
         }
     }
@@ -249,6 +307,11 @@ int main(int argc, char *argv[])
     if (node_parse_port(porta_local, &config.port) != 0)
     {
         fprintf(stderr, "Erro: porta invalida: %s\n", porta_local);
+        return 1;
+    }
+    if (strcmp(cmd, "lookup") == 0 && ler_object_id(object_id_param, object_id) != 0)
+    {
+        fprintf(stderr, "Erro: --object-id precisa de 64 caracteres hex\n");
         return 1;
     }
     if (porta < 1 || porta > 65535)
@@ -319,6 +382,19 @@ int main(int argc, char *argv[])
         msg.header.tamanho_payload = (uint32_t)strlen(name_param);
         msg.payload = (uint8_t *)strdup(name_param);
     }
+    else if (strcmp(cmd, "topology") == 0)
+    {
+        msg.header.tipo_mensagem = MSG_TOPOLOGY;
+        msg.header.tamanho_payload = 0;
+    }
+    else if (strcmp(cmd, "lookup") == 0)
+    {
+        msg.header.tipo_mensagem = MSG_CHORD_LOOKUP;
+        msg.header.tamanho_payload = NODE_ID_LEN;
+        msg.payload = (uint8_t *)malloc(NODE_ID_LEN);
+        if (msg.payload != NULL)
+            memcpy(msg.payload, object_id, NODE_ID_LEN);
+    }
     else if (strcmp(cmd, "leave") == 0)
     {
         msg.header.tipo_mensagem = MSG_LEAVE;
@@ -333,7 +409,7 @@ int main(int argc, char *argv[])
     }
 
     // sem payload nao ha o que enviar
-    if (msg.payload == NULL)
+    if (msg.payload == NULL && msg.header.tipo_mensagem != MSG_TOPOLOGY)
     {
         close(socket_fd);
         return 1;
@@ -346,14 +422,27 @@ int main(int argc, char *argv[])
         memset(&resposta, 0, sizeof(Mensagem));
         if (receber_mensagem(socket_fd, &resposta) == 0)
         {
-            if (msg.header.tipo_mensagem == MSG_JOIN && resposta.header.tipo_mensagem == MSG_ACK)
+            // topology e lookup recebem o texto pronto do super peer
+            if ((msg.header.tipo_mensagem == MSG_TOPOLOGY || msg.header.tipo_mensagem == MSG_CHORD_LOOKUP) &&
+                resposta.header.tipo_mensagem == MSG_ACK && resposta.payload != NULL)
+            {
+                fwrite(resposta.payload, 1, resposta.header.tamanho_payload, stdout);
+            }
+            else if ((msg.header.tipo_mensagem == MSG_TOPOLOGY || msg.header.tipo_mensagem == MSG_CHORD_LOOKUP) &&
+                     resposta.header.tipo_mensagem != MSG_ACK)
+            {
+                printf("Erro: super peer respondeu %s\n", nome_do_tipo(resposta.header.tipo_mensagem));
+            }
+            else if (msg.header.tipo_mensagem == MSG_JOIN && resposta.header.tipo_mensagem == MSG_ACK)
             {
                 peer.state = STATE_AUTHENTICATED;
             }
             else if (msg.header.tipo_mensagem == MSG_LOOKUP && resposta.header.tipo_mensagem == MSG_ACK)
             {
                 FileMetadata meta;
-                if (metadata_deserialize(resposta.payload, resposta.header.tamanho_payload, &meta) == METADATA_OK)
+                uint32_t tamanho_meta = 0;
+                if (separar_provedores(resposta.payload, resposta.header.tamanho_payload, &tamanho_meta) == 0 &&
+                    metadata_deserialize(resposta.payload, tamanho_meta, &meta) == METADATA_OK)
                 {
                     char out_file[256];
                     if (strlen(output_param) > 0)
