@@ -9,19 +9,20 @@
 #include <getopt.h>
 #include <pthread.h>
 
-#include "node.c"
-#include "metadata.c"
-#include "network.c"
-
 /* Versao de protocolo aceita neste checkpoint */
 #define VERSAO_PROTOCOLO 1
+
+#include "node.c"
+#include "network.c"
+#include "metadata.c"
+#include "chord.c"
 
 /* Valores usados quando o no e iniciado pelas opcoes longas */
 #define IP_PADRAO "127.0.0.1"
 #define PORTA_PADRAO "55101"
-#define UUID_PADRAO "superpeer.uuid"
 #define NOME_PADRAO "superpeer"
 #define NOME_MAX 64
+#define LINHA_MAX 256
 
 #define MAX_MEMBERS 64
 
@@ -375,6 +376,70 @@ static void tratar_lookup(const Conexao *conexao, const Mensagem *msg)
     metadata_free(&meta);
 }
 
+/* Validacao comum das mensagens do Chord */
+static int validar_chord(const Mensagem *msg)
+{
+    const char *tipo = nome_do_tipo(msg->header.tipo_mensagem);
+
+    if (msg->header.versao_protocolo != VERSAO_PROTOCOLO) {
+        printf("%s recusado: versao de protocolo %u\n", tipo, msg->header.versao_protocolo);
+        return -1;
+    }
+    if (node_id_is_zero(msg->header.no_origem)) {
+        printf("%s recusado: NodeID zerado\n", tipo);
+        return -1;
+    }
+    return 0;
+}
+
+/* Trata FIND_SUCCESSOR, GET_PREDECESSOR, NOTIFY, CHORD_LOOKUP e TOPOLOGY */
+static void tratar_chord(const Conexao *conexao, const Mensagem *msg)
+{
+    uint8_t binario[1 + CHORD_NODE_MAX];
+    char texto[CHORD_TEXT_LEN];
+    uint8_t *payload = binario;
+    uint32_t tamanho = msg->header.tamanho_payload;
+    uint32_t tamanho_resposta = 0;
+    int resultado = -1;
+
+    if (validar_chord(msg) != 0) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    switch (msg->header.tipo_mensagem) {
+    case MSG_FIND_SUCCESSOR:
+        resultado = chord_handle_find_successor(msg->payload, tamanho, binario, &tamanho_resposta);
+        break;
+    case MSG_GET_PREDECESSOR:
+        resultado = chord_handle_get_predecessor(tamanho, binario, &tamanho_resposta);
+        break;
+    case MSG_NOTIFY:
+        resultado = chord_handle_notify(msg->payload, tamanho);
+        break;
+    case MSG_CHORD_LOOKUP:
+        resultado = chord_handle_lookup(msg->payload, tamanho, texto, sizeof(texto));
+        payload = (uint8_t *)texto;
+        tamanho_resposta = (resultado == 0) ? (uint32_t)strlen(texto) : 0;
+        break;
+    case MSG_TOPOLOGY:
+        resultado = chord_handle_topology(tamanho, texto, sizeof(texto));
+        payload = (uint8_t *)texto;
+        tamanho_resposta = (resultado == 0) ? (uint32_t)strlen(texto) : 0;
+        break;
+    default:
+        break;
+    }
+
+    if (resultado != 0) {
+        printf("%s recusado: payload invalido\n", nome_do_tipo(msg->header.tipo_mensagem));
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    responder_com_payload(conexao, MSG_ACK, msg->header.no_origem,
+                          (tamanho_resposta > 0) ? payload : NULL, tamanho_resposta);
+}
+
 /* Atende uma conexao aceita e encerra o socket */
 static void *atender_conexao(void *arg)
 {
@@ -405,6 +470,13 @@ static void *atender_conexao(void *arg)
         case MSG_LOOKUP:
             tratar_lookup(&conexao, &msg);
             break;
+        case MSG_FIND_SUCCESSOR:
+        case MSG_GET_PREDECESSOR:
+        case MSG_NOTIFY:
+        case MSG_CHORD_LOOKUP:
+        case MSG_TOPOLOGY:
+            tratar_chord(&conexao, &msg);
+            break;
         default:
             printf("Tipo de mensagem nao suportado\n");
             responder(&conexao, MSG_ERROR, msg.header.no_origem);
@@ -424,10 +496,73 @@ static void mostrar_uso(const char *programa)
     fprintf(stderr, "  %s --port <porta> [--name <nome>] [--config <arquivo>]\n", programa);
 }
 
+/* Le o endereco "ip:porta" do bootstrap */
+static int ler_bootstrap(const char *valor, NodeConfig *config)
+{
+    char texto[32];
+    char *separador;
+
+    if (strlen(valor) >= sizeof(texto)) {
+        return -1;
+    }
+    snprintf(texto, sizeof(texto), "%s", valor);
+
+    separador = strchr(texto, ':');
+    if (separador == NULL) {
+        return -1;
+    }
+    *separador = '\0';
+
+    if (node_parse_ip(texto, config->superpeer_ip, sizeof(config->superpeer_ip)) != 0) {
+        return -1;
+    }
+    return node_parse_port(separador + 1, &config->superpeer_port);
+}
+
+/* Le o arquivo chave=valor; porta e nome so valem se nao vieram na linha de comando */
+static int ler_config(const char *caminho, NodeConfig *config, char *porta, size_t tamanho_porta,
+                      int tem_porta, char *nome, size_t tamanho_nome, int tem_nome)
+{
+    char linha[LINHA_MAX];
+    char *valor;
+    FILE *arquivo = fopen(caminho, "r");
+    int resultado = 0;
+
+    if (arquivo == NULL) {
+        fprintf(stderr, "Erro: nao foi possivel abrir %s\n", caminho);
+        return -1;
+    }
+
+    while (resultado == 0 && fgets(linha, sizeof(linha), arquivo) != NULL) {
+        linha[strcspn(linha, "\r\n")] = '\0';
+        valor = strchr(linha, '=');
+        if (linha[0] == '#' || valor == NULL) {
+            continue;
+        }
+        *valor = '\0';
+        valor++;
+
+        if (strcmp(linha, "port") == 0 && !tem_porta) {
+            snprintf(porta, tamanho_porta, "%s", valor);
+        } else if (strcmp(linha, "name") == 0 && !tem_nome) {
+            snprintf(nome, tamanho_nome, "%s", valor);
+        } else if (strcmp(linha, "bootstrap") == 0 && ler_bootstrap(valor, config) != 0) {
+            fprintf(stderr, "Erro: bootstrap invalido: %s\n", valor);
+            resultado = -1;
+        }
+    }
+
+    fclose(arquivo);
+    return resultado;
+}
+
 /* Le a configuracao no formato de opcoes longas */
 static int ler_opcoes(int argc, char *argv[], NodeConfig *config, char *nome, size_t tamanho_nome)
 {
     char porta[8];
+    const char *caminho_config = NULL;
+    int tem_porta = 0;
+    int tem_nome = 0;
     int opt;
     struct option longas[] = {
         {"config", required_argument, 0, 'c'},
@@ -439,23 +574,30 @@ static int ler_opcoes(int argc, char *argv[], NodeConfig *config, char *nome, si
     memset(config, 0, sizeof(*config));
     config->role = ROLE_SUPERPEER;
     snprintf(porta, sizeof(porta), "%s", PORTA_PADRAO);
-    snprintf(nome, tamanho_nome, "%s", NOME_PADRAO);
-    snprintf(config->uuid_path, sizeof(config->uuid_path), "%s", UUID_PADRAO);
+    nome[0] = '\0';
 
     while ((opt = getopt_long(argc, argv, "c:p:n:", longas, NULL)) != -1) {
         switch (opt) {
         case 'c':
-            /* o arquivo de configuracao nao e usado neste checkpoint */
+            caminho_config = optarg;
             break;
         case 'p':
             snprintf(porta, sizeof(porta), "%s", optarg);
+            tem_porta = 1;
             break;
         case 'n':
             snprintf(nome, tamanho_nome, "%s", optarg);
+            tem_nome = 1;
             break;
         default:
             return -1;
         }
+    }
+
+    if (caminho_config != NULL &&
+        ler_config(caminho_config, config, porta, sizeof(porta), tem_porta,
+                   nome, tamanho_nome, tem_nome) != 0) {
+        return -1;
     }
 
     if (node_parse_ip(IP_PADRAO, config->ip, sizeof(config->ip)) != 0) {
@@ -465,6 +607,12 @@ static int ler_opcoes(int argc, char *argv[], NodeConfig *config, char *nome, si
         fprintf(stderr, "Erro: porta invalida: %s\n", porta);
         return -1;
     }
+
+    /* Sem nome, usa SP<porta>; cada porta tem o seu arquivo de UUID */
+    if (nome[0] == '\0') {
+        snprintf(nome, tamanho_nome, "SP%u", config->port);
+    }
+    snprintf(config->uuid_path, sizeof(config->uuid_path), "superpeer_%u.uuid", config->port);
     return 0;
 }
 
@@ -499,7 +647,7 @@ int main(int argc, char *argv[])
     if (node_init(&superpeer, &config) != 0) {
         return 1;
     }
-    // node_print removido para limpar o terminal
+    node_print(&superpeer);
 
     servidor_fd = criar_servidor(superpeer.port);
     if (servidor_fd < 0) {
@@ -509,6 +657,12 @@ int main(int argc, char *argv[])
     superpeer.state = STATE_CONNECTED;
     printf("Node %s started\n", nome);
     printf("Escutando na porta %u\n", superpeer.port);
+
+    if (chord_start(&superpeer, nome, config.superpeer_ip, config.superpeer_port) != 0) {
+        fprintf(stderr, "Erro: nao foi possivel iniciar o Chord\n");
+        close(servidor_fd);
+        return 1;
+    }
 
     for (;;) {
         Conexao *conexao;

@@ -24,7 +24,12 @@ typedef enum {
     MSG_ACK = 17,
     MSG_ERROR = 18,
     MSG_PING = 19,
-    MSG_PONG = 20
+    MSG_PONG = 20,
+    MSG_FIND_SUCCESSOR = 21,
+    MSG_GET_PREDECESSOR = 22,
+    MSG_NOTIFY = 23,
+    MSG_CHORD_LOOKUP = 24,
+    MSG_TOPOLOGY = 25
 } TipoMensagem;
 
 // converte id do comando para texto legivel nos logs
@@ -38,6 +43,11 @@ const char* nome_do_tipo(uint16_t tipo) {
         case MSG_PONG: return "PONG";
         case MSG_ACK: return "ACK";
         case MSG_ERROR: return "ERROR";
+        case MSG_FIND_SUCCESSOR: return "FIND_SUCCESSOR";
+        case MSG_GET_PREDECESSOR: return "GET_PREDECESSOR";
+        case MSG_NOTIFY: return "NOTIFY";
+        case MSG_CHORD_LOOKUP: return "CHORD_LOOKUP";
+        case MSG_TOPOLOGY: return "TOPOLOGY";
         default: return "UNKNOWN";
     }
 }

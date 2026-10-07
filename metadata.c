@@ -533,6 +533,7 @@ int metadata_table_insert(const FileMetadata *meta)
         snprintf(metadata_names[livre_nome].filename, METADATA_NAME_LEN, "%s",
                  metadata_slots[livre_id].meta.filename);
         memcpy(metadata_names[livre_nome].object_id, meta->object_id, METADATA_ID_LEN);
+        metadata_print(&metadata_slots[livre_id].meta);
     }
 
     pthread_mutex_unlock(&metadata_mutex);
