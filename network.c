@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,8 +8,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
-// inclui arquivo de protocolo 
-#include "protocol.c"
+#include "include/network.h"
 
 // framing, mantem o laco ate enviar todos os bytes solicitados 
 static int enviar(int socket, const uint8_t *buffer, size_t tamanho) {

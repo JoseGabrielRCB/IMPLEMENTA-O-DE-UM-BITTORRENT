@@ -9,35 +9,7 @@
 #include <pthread.h>
 #include <openssl/sha.h>
 
-#define METADATA_ID_LEN 32
-#define METADATA_HASH_LEN 32
-#define METADATA_NAME_LEN 256
-#define METADATA_NAME_MAX 255
-
-#define MAX_FILES 256
-#define CHUNK_SIZE (4 * 1024 * 1024)
-
-/* Retornos das operacoes de metadados */
-#define METADATA_OK 0
-#define METADATA_ERR_INVALID (-1)
-#define METADATA_ERR_MEMORY (-2)
-#define METADATA_ERR_FULL (-3)
-#define METADATA_ERR_NAME_TAKEN (-4)
-#define METADATA_ERR_NOT_FOUND (-5)
-#define METADATA_ERR_FILE (-6)
-
-/* Metadado de um arquivo registrado */
-typedef struct {
-    uint8_t   object_id[32];
-    char      filename[256];
-    uint64_t  size;
-    uint32_t  chunk_count;
-    uint8_t **chunk_hashes;
-    uint64_t  version;
-    uint8_t   owner[32];
-} FileMetadata;
-
-#define MAX_PROVIDERS 10
+#include "include/metadata.h"
 
 /* Entrada da tabela principal, indexada pelo ObjectID */
 typedef struct {
@@ -53,26 +25,6 @@ typedef struct {
     char filename[METADATA_NAME_LEN];
     uint8_t object_id[METADATA_ID_LEN];
 } MetadataNameSlot;
-
-int metadata_create(FileMetadata *meta, uint32_t chunk_count);
-void metadata_free(FileMetadata *meta);
-int metadata_copy(FileMetadata *dest, const FileMetadata *src);
-void metadata_print(const FileMetadata *meta);
-
-int metadata_compute_object_id(const char *path, uint8_t object_id[METADATA_ID_LEN],
-                               uint64_t *size);
-int metadata_check_chunks(const FileMetadata *meta);
-
-int metadata_serialize(const FileMetadata *meta, uint8_t **buffer, uint32_t *size);
-int metadata_deserialize(const uint8_t *buffer, uint32_t size, FileMetadata *meta);
-
-int metadata_table_insert(const FileMetadata *meta);
-int metadata_table_find_by_id(const uint8_t object_id[METADATA_ID_LEN], FileMetadata *out);
-int metadata_table_find_by_name(const char *filename, FileMetadata *out);
-void metadata_table_print(void);
-
-int metadata_add_provider(const uint8_t object_id[METADATA_ID_LEN], const uint8_t node_id[32]);
-int metadata_get_providers(const uint8_t object_id[METADATA_ID_LEN], uint8_t out_providers[][32], int *count);
 
 /* Tabelas de metadados e o mutex que protege as duas */
 static MetadataSlot metadata_slots[MAX_FILES];

@@ -7,11 +7,12 @@
 #include <getopt.h>
 #include <ctype.h>
 
-#include "node.c"
-#include "network.c"
-#include "metadata.c"
 #include <lz4.h>
 #include <openssl/sha.h>
+
+#include "include/node.h"
+#include "include/network.h"
+#include "include/metadata.h"
 
 void calcular_hash_global(const char *caminho, uint8_t *hash_saida)
 {

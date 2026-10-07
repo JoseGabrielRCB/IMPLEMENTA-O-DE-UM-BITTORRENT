@@ -8,6 +8,11 @@
 #include <unistd.h>
 #include <pthread.h>
 
+#include "include/network.h"
+#include "include/node.h"
+#include "include/chord.h"
+#include "include/gossip.h"
+
 #define GOSSIP_MAX 64
 #define GOSSIP_HEARTBEAT_SEC 5
 #define GOSSIP_TIMEOUT_SEC 15

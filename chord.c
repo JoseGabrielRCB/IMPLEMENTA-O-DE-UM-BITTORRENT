@@ -9,23 +9,14 @@
 #include <unistd.h>
 #include <pthread.h>
 
+#include "include/network.h"
+#include "include/node.h"
+#include "include/chord.h"
+
 #define CHORD_FINGERS 256
 #define CHORD_PERIOD_SEC 1
 #define CHORD_MAX_HOPS 32
-#define CHORD_NAME_LEN 64
 #define CHORD_IP_MIN 7
-#define CHORD_TEXT_LEN 32768
-
-/* Maior no serializado: id + porta + ip_len + ip + name_len + nome */
-#define CHORD_NODE_MAX (NODE_ID_LEN + 2 + 1 + (NODE_IP_LEN - 1) + 1 + (CHORD_NAME_LEN - 1))
-
-/* No do anel */
-typedef struct {
-    uint8_t id[NODE_ID_LEN];
-    char ip[NODE_IP_LEN];
-    uint16_t port;
-    char name[CHORD_NAME_LEN];
-} ChordNode;
 
 /* Dados repassados para a thread periodica */
 typedef struct {
@@ -42,7 +33,7 @@ static ChordNode chord_finger[CHORD_FINGERS];
 static pthread_mutex_t chord_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Diz se os dois nos tem o mesmo NodeID */
-static int chord_same(const ChordNode *a, const ChordNode *b)
+int chord_same(const ChordNode *a, const ChordNode *b)
 {
     return node_id_compare(a->id, b->id) == 0;
 }
@@ -88,7 +79,7 @@ static void chord_add_pow2(const uint8_t id[NODE_ID_LEN], int i, uint8_t out[NOD
 }
 
 /* Grava o no no buffer e devolve quantos bytes usou */
-static uint32_t chord_node_write(const ChordNode *no, uint8_t *buffer)
+uint32_t chord_node_write(const ChordNode *no, uint8_t *buffer)
 {
     size_t ip_len = strnlen(no->ip, NODE_IP_LEN - 1);
     size_t name_len = strnlen(no->name, CHORD_NAME_LEN - 1);
@@ -108,13 +99,13 @@ static uint32_t chord_node_write(const ChordNode *no, uint8_t *buffer)
 }
 
 /* Confere se ainda ha n bytes para ler a partir de pos */
-static int chord_has_bytes(uint32_t size, uint32_t pos, uint32_t n)
+int chord_has_bytes(uint32_t size, uint32_t pos, uint32_t n)
 {
     return pos <= size && size - pos >= n;
 }
 
 /* Le um no do buffer a partir de pos, validando cada campo */
-static int chord_node_read(const uint8_t *buffer, uint32_t size, uint32_t *pos, ChordNode *no)
+int chord_node_read(const uint8_t *buffer, uint32_t size, uint32_t *pos, ChordNode *no)
 {
     char ip[NODE_IP_LEN];
     uint8_t ip_len;

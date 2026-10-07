@@ -9,14 +9,11 @@
 #include <getopt.h>
 #include <pthread.h>
 
-/* Versao de protocolo aceita neste checkpoint */
-#define VERSAO_PROTOCOLO 1
-
-#include "node.c"
-#include "network.c"
-#include "metadata.c"
-#include "chord.c"
-#include "gossip.c"
+#include "include/node.h"
+#include "include/network.h"
+#include "include/metadata.h"
+#include "include/chord.h"
+#include "include/gossip.h"
 
 /* Valores usados quando o no e iniciado pelas opcoes longas */
 #define IP_PADRAO "127.0.0.1"
