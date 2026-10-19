@@ -5,7 +5,7 @@ LDLIBS = -lcrypto -llz4
 
 # objetos de cada executavel
 SUPERPEER_OBJS = build/superpeer.o build/node.o build/protocol.o build/network.o \
-                 build/metadata.o build/chord.o build/gossip.o
+                 build/metadata.o build/chord.o build/gossip.o build/bully.o build/smr.o
 PEER_OBJS = build/peer.o build/node.o build/protocol.o build/network.o build/metadata.o
 
 # regras principais
@@ -26,8 +26,12 @@ build/node.o: include/node.h
 build/metadata.o: include/metadata.h
 build/chord.o: include/chord.h include/node.h include/network.h include/protocol.h
 build/gossip.o: include/gossip.h include/chord.h include/node.h include/network.h include/protocol.h
+build/bully.o: include/bully.h include/chord.h include/gossip.h include/node.h include/network.h \
+               include/protocol.h include/smr.h include/metadata.h
+build/smr.o: include/smr.h include/metadata.h include/bully.h include/chord.h include/gossip.h \
+             include/node.h include/network.h include/protocol.h
 build/superpeer.o: include/node.h include/network.h include/protocol.h include/metadata.h \
-                   include/chord.h include/gossip.h
+                   include/chord.h include/gossip.h include/bully.h include/smr.h
 build/peer.o: include/node.h include/network.h include/protocol.h include/metadata.h
 
 # liga o super peer (servidor)

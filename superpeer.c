@@ -14,6 +14,8 @@
 #include "include/metadata.h"
 #include "include/chord.h"
 #include "include/gossip.h"
+#include "include/bully.h"
+#include "include/smr.h"
 
 /* Valores usados quando o no e iniciado pelas opcoes longas */
 #define IP_PADRAO "127.0.0.1"
@@ -318,46 +320,89 @@ static int validar_origem(const Mensagem *msg, const char *tipo)
     return 0;
 }
 
-/* Desserializa, valida e registra o metadado recebido */
-static void tratar_store(const Conexao *conexao, const Mensagem *msg)
-{
-    FileMetadata meta;
-    int resultado;
+static int validar_chord(const Mensagem *msg);
 
-    if (validar_origem(msg, "STORE") != 0) {
-        responder(conexao, MSG_ERROR, msg->header.no_origem);
-        return;
-    }
-    if (metadata_deserialize(msg->payload, msg->header.tamanho_payload, &meta) != METADATA_OK) {
+/* Le o metadado do STORE, confere os chunks e marca dono e versao */
+static int ler_metadado_store(const Mensagem *msg, FileMetadata *meta)
+{
+    if (metadata_deserialize(msg->payload, msg->header.tamanho_payload, meta) != METADATA_OK) {
         printf("STORE recusado: metadado invalido no payload\n");
-        responder(conexao, MSG_ERROR, msg->header.no_origem);
-        return;
+        return -1;
     }
-    if (metadata_check_chunks(&meta) != METADATA_OK) {
+    if (metadata_check_chunks(meta) != METADATA_OK) {
         printf("STORE recusado: chunk_count nao bate com o tamanho\n");
-        metadata_free(&meta);
-        responder(conexao, MSG_ERROR, msg->header.no_origem);
-        return;
+        metadata_free(meta);
+        return -1;
     }
 
     /* o dono e quem enviou e a versao comeca em 1 */
-    memcpy(meta.owner, msg->header.no_origem, NODE_ID_LEN);
-    meta.version = 1;
+    memcpy(meta->owner, msg->header.no_origem, NODE_ID_LEN);
+    meta->version = 1;
+    return 0;
+}
 
-    resultado = metadata_table_insert(&meta);
-    if (resultado == METADATA_OK) {
-        metadata_add_provider(meta.object_id, msg->header.no_origem);
+/* Repassa o STORE ao coordenador e devolve o tipo da resposta dele */
+static uint16_t repassar_store(const Mensagem *msg, const ChordNode *coord)
+{
+    Mensagem pedido = *msg;
+    Mensagem resposta;
+    uint16_t tipo;
+    int resultado = -1;
+    int fd;
+
+    /* no_destino = coordenador marca o STORE como repassado */
+    memcpy(pedido.header.no_destino, coord->id, NODE_ID_LEN);
+    memset(&resposta, 0, sizeof(resposta));
+
+    fd = conectar_no_servidor(coord->ip, coord->port);
+    if (fd >= 0) {
+        resultado = enviar_mensagem(fd, &pedido);
+        if (resultado == 0) {
+            resultado = receber_mensagem(fd, &resposta);
+        }
+        close(fd);
     }
+    if (resultado != 0) {
+        printf("STORE: sem coordenador\n");
+        return MSG_ERROR;
+    }
+
+    tipo = resposta.header.tipo_mensagem;
+    liberar_mensagem(&resposta);
+    printf("STORE repassado ao coordenador %s: %s\n", coord->name, nome_do_tipo(tipo));
+    return tipo;
+}
+
+/* Valida o STORE; o coordenador registra no log e os demais repassam a ele */
+static void tratar_store(const Conexao *conexao, const Mensagem *msg)
+{
+    const uint8_t *self = conexao->superpeer->node_id;
+    int repassado = node_id_compare(msg->header.no_destino, self) == 0;
+    FileMetadata meta;
+    ChordNode coord;
+    uint16_t tipo;
+
+    /* STORE repassado vem de outro Super Peer, sem JOIN do peer aqui */
+    if ((repassado ? validar_chord(msg) : validar_origem(msg, "STORE")) != 0 ||
+        ler_metadado_store(msg, &meta) != 0) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    if (!bully_get_coordinator(&coord)) {
+        printf("STORE: sem coordenador\n");
+        tipo = MSG_ERROR;
+    } else if (node_id_compare(coord.id, self) == 0) {
+        tipo = (smr_put(&meta, msg->header.no_origem) == 0) ? MSG_ACK : MSG_ERROR;
+    } else if (repassado) {
+        printf("STORE recusado: repassado, mas este no nao e o coordenador\n");
+        tipo = MSG_ERROR;
+    } else {
+        tipo = repassar_store(msg, &coord);
+    }
+
     metadata_free(&meta);
-
-    if (resultado == METADATA_ERR_NAME_TAKEN) {
-        printf("STORE recusado: nome ja usado por outro ObjectID\n");
-    } else if (resultado == METADATA_ERR_FULL) {
-        printf("STORE recusado: tabela de metadados cheia\n");
-    } else if (resultado != METADATA_OK) {
-        printf("STORE recusado: nao foi possivel registrar\n");
-    }
-    responder(conexao, (resultado == METADATA_OK) ? MSG_ACK : MSG_ERROR, msg->header.no_origem);
+    responder(conexao, tipo, msg->header.no_origem);
 }
 
 /* Responde o LOOKUP com o metadado seguido de count + ProviderInfo de cada provedor */
@@ -532,6 +577,45 @@ static void tratar_gossip(const Conexao *conexao, const Mensagem *msg)
     free(tabela);
 }
 
+/* Trata ELECTION (responde OK se quem enviou e menor) e COORDINATOR */
+static void tratar_bully(const Conexao *conexao, const Mensagem *msg)
+{
+    uint16_t tipo = MSG_ACK;
+    int resultado;
+
+    if (validar_chord(msg) != 0) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    if (msg->header.tipo_mensagem == MSG_ELECTION) {
+        resultado = bully_handle_election(msg->payload, msg->header.tamanho_payload);
+        if (resultado == 1) {
+            tipo = MSG_OK;
+        }
+    } else {
+        resultado = bully_handle_coordinator(msg->payload, msg->header.tamanho_payload);
+    }
+
+    if (resultado < 0) {
+        printf("%s recusado: payload invalido\n", nome_do_tipo(msg->header.tipo_mensagem));
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    responder(conexao, tipo, msg->header.no_origem);
+}
+
+/* Trata LOG_APPEND do coordenador */
+static void tratar_log_append(const Conexao *conexao, const Mensagem *msg)
+{
+    if (validar_chord(msg) != 0 ||
+        smr_handle_log_append(msg->header.no_origem, msg->payload, msg->header.tamanho_payload) != 0) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    responder(conexao, MSG_ACK, msg->header.no_origem);
+}
+
 /* Atende uma conexao aceita e encerra o socket */
 static void *atender_conexao(void *arg)
 {
@@ -572,6 +656,13 @@ static void *atender_conexao(void *arg)
         case MSG_HEARTBEAT:
         case MSG_GOSSIP:
             tratar_gossip(&conexao, &msg);
+            break;
+        case MSG_ELECTION:
+        case MSG_COORDINATOR:
+            tratar_bully(&conexao, &msg);
+            break;
+        case MSG_LOG_APPEND:
+            tratar_log_append(&conexao, &msg);
             break;
         default:
             printf("Tipo de mensagem nao suportado\n");
@@ -615,7 +706,34 @@ static int ler_bootstrap(const char *valor, NodeConfig *config)
     return node_parse_port(separador + 1, &config->superpeer_port);
 }
 
-/* Le o arquivo chave=valor; porta e nome so valem se nao vieram na linha de comando */
+/* Linha CSV nome,papel,ip,porta,...: a primeira vira bootstrap (se nao houver
+ * bootstrap=) e a da porta deste no da o nome */
+static int ler_linha_csv(const char *linha, NodeConfig *config, const char *porta,
+                         char *nome, size_t tamanho_nome, int tem_nome)
+{
+    char nome_csv[NOME_MAX];
+    char papel[16];
+    char ip[NODE_IP_LEN];
+    char porta_csv[8];
+    char endereco[32];
+
+    if (sscanf(linha, "%63[^,],%15[^,],%15[^,],%7[^,]", nome_csv, papel, ip, porta_csv) != 4) {
+        return 0;
+    }
+    if (config->superpeer_port == 0) {
+        snprintf(endereco, sizeof(endereco), "%s:%s", ip, porta_csv);
+        if (ler_bootstrap(endereco, config) != 0) {
+            fprintf(stderr, "Erro: linha invalida: %s\n", linha);
+            return -1;
+        }
+    }
+    if (!tem_nome && strcmp(porta_csv, porta) == 0) {
+        snprintf(nome, tamanho_nome, "%s", nome_csv);
+    }
+    return 0;
+}
+
+/* Le o arquivo chave=valor ou CSV; porta e nome so valem se nao vieram na linha de comando */
 static int ler_config(const char *caminho, NodeConfig *config, char *porta, size_t tamanho_porta,
                       int tem_porta, char *nome, size_t tamanho_nome, int tem_nome)
 {
@@ -632,7 +750,11 @@ static int ler_config(const char *caminho, NodeConfig *config, char *porta, size
     while (resultado == 0 && fgets(linha, sizeof(linha), arquivo) != NULL) {
         linha[strcspn(linha, "\r\n")] = '\0';
         valor = strchr(linha, '=');
-        if (linha[0] == '#' || valor == NULL) {
+        if (linha[0] == '#') {
+            continue;
+        }
+        if (valor == NULL) {
+            resultado = ler_linha_csv(linha, config, porta, nome, tamanho_nome, tem_nome);
             continue;
         }
         *valor = '\0';
@@ -761,6 +883,11 @@ int main(int argc, char *argv[])
     }
     if (gossip_start(&superpeer, nome, config.superpeer_ip, config.superpeer_port) != 0) {
         fprintf(stderr, "Erro: nao foi possivel iniciar o Gossip\n");
+        close(servidor_fd);
+        return 1;
+    }
+    if (smr_start(&superpeer) != 0 || bully_start(&superpeer, nome) != 0) {
+        fprintf(stderr, "Erro: nao foi possivel iniciar o Bully e o SMR\n");
         close(servidor_fd);
         return 1;
     }

@@ -23,6 +23,10 @@ const char *nome_do_tipo(uint16_t tipo) {
         case MSG_NOTIFY: return "NOTIFY";
         case MSG_CHORD_LOOKUP: return "CHORD_LOOKUP";
         case MSG_TOPOLOGY: return "TOPOLOGY";
+        case MSG_ELECTION: return "ELECTION";
+        case MSG_OK: return "OK";
+        case MSG_COORDINATOR: return "COORDINATOR";
+        case MSG_LOG_APPEND: return "LOG_APPEND";
         default: return "UNKNOWN";
     }
 }

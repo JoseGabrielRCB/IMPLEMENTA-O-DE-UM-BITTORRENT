@@ -8,3 +8,7 @@ tests/c1/logs/*.log
 
 teste 2/
 build/
+
+# gerados ao rodar o peer (upload e download)
+downloaded_*
+storage/*.lz4

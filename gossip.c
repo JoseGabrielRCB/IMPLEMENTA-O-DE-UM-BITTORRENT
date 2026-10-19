@@ -20,14 +20,6 @@
 /* Maior entrada serializada: no + estado + contador de heartbeat */
 #define GOSSIP_ENTRY_MAX (CHORD_NODE_MAX + 1 + sizeof(uint64_t))
 
-/* Estados de um Super Peer na membership */
-typedef enum {
-    GOSSIP_ALIVE = 0,
-    GOSSIP_SUSPECT = 1,
-    GOSSIP_FAILED = 2,
-    GOSSIP_REMOVED = 3
-} GossipState;
-
 /* Entrada da membership dos Super Peers */
 typedef struct {
     ChordNode node;
@@ -441,4 +433,39 @@ int gossip_handle_gossip(const uint8_t *payload, uint32_t tamanho, uint8_t **res
         return -1;
     }
     return gossip_table_write(resposta, tamanho_resposta);
+}
+
+/* Copia os membros ALIVE em out e retorna quantos */
+int gossip_alive_members(ChordNode *out, int max)
+{
+    int total = 0;
+    int i;
+
+    if (out == NULL || max <= 0 || pthread_mutex_lock(&gossip_mutex) != 0) {
+        return 0;
+    }
+    for (i = 0; i < gossip_count && total < max; i++) {
+        if (gossip_members[i].state == GOSSIP_ALIVE) {
+            out[total++] = gossip_members[i].node;
+        }
+    }
+    pthread_mutex_unlock(&gossip_mutex);
+    return total;
+}
+
+/* Estado do membro na membership, ou -1 se nao esta nela */
+int gossip_member_state(const uint8_t id[NODE_ID_LEN])
+{
+    int estado = -1;
+    int indice;
+
+    if (id == NULL || pthread_mutex_lock(&gossip_mutex) != 0) {
+        return -1;
+    }
+    indice = gossip_find(id);
+    if (indice >= 0) {
+        estado = gossip_members[indice].state;
+    }
+    pthread_mutex_unlock(&gossip_mutex);
+    return estado;
 }

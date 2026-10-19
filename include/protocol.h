@@ -33,7 +33,8 @@ typedef enum {
     MSG_GET_PREDECESSOR = 22,
     MSG_NOTIFY = 23,
     MSG_CHORD_LOOKUP = 24,
-    MSG_TOPOLOGY = 25
+    MSG_TOPOLOGY = 25,
+    MSG_LOG_APPEND = 26
 } TipoMensagem;
 
 /* IP e porta de um peer provedor, anexados na resposta do LOOKUP */

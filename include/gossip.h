@@ -4,6 +4,15 @@
 #include <stdint.h>
 
 #include "node.h"
+#include "chord.h"
+
+/* Estados de um Super Peer na membership */
+typedef enum {
+    GOSSIP_ALIVE = 0,
+    GOSSIP_SUSPECT = 1,
+    GOSSIP_FAILED = 2,
+    GOSSIP_REMOVED = 3
+} GossipState;
 
 /* Inicia a membership dos Super Peers e cria a thread periodica:
  * a cada 5 s manda HEARTBEAT para os membros vivos e troca a tabela (GOSSIP)
@@ -23,5 +32,13 @@ int gossip_handle_heartbeat(const uint8_t *payload, uint32_t tamanho);
  * *resposta (alocada; quem chamou libera com free). Retorna 0 ou -1. */
 int gossip_handle_gossip(const uint8_t *payload, uint32_t tamanho, uint8_t **resposta,
                          uint32_t *tamanho_resposta);
+
+/* Copia em out (espaco para max nos) os membros ALIVE, sem este no.
+ * Retorna quantos copiou. Trava o mutex da membership, sem rede. */
+int gossip_alive_members(ChordNode *out, int max);
+
+/* Retorna o estado (GossipState) do membro com esse NodeID, ou -1 se ele
+ * nao esta na membership. Trava o mutex da membership, sem rede. */
+int gossip_member_state(const uint8_t id[NODE_ID_LEN]);
 
 #endif
