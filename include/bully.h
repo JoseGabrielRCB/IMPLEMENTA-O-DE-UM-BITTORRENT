@@ -9,7 +9,7 @@
 /* Tempos da eleicao, em segundos */
 #define BULLY_WAIT_SEC 5
 #define BULLY_PERIOD_SEC 1
-#define BULLY_START_SEC 10
+#define BULLY_START_SEC 5
 #define BULLY_ANNOUNCE_SEC 5
 
 /* Estados do no na eleicao (Secao 15.3) */

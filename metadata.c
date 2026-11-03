@@ -401,7 +401,7 @@ static int metadata_find_id_index(const uint8_t object_id[METADATA_ID_LEN])
     return -1;
 }
 
-/* Procura o nome no indice, usar com o mutex travado */
+/* Procura o nome (ou basename apos '/') no indice, usar com o mutex travado */
 static int metadata_find_name_index(const char *filename)
 {
     uint32_t inicio = metadata_hash_name(filename);
@@ -411,10 +411,19 @@ static int metadata_find_name_index(const char *filename)
         uint32_t indice = (inicio + i) % MAX_FILES;
 
         if (!metadata_names[indice].used) {
-            return -1;
+            break;
         }
         if (strcmp(metadata_names[indice].filename, filename) == 0) {
             return (int)indice;
+        }
+    }
+    for (i = 0; i < MAX_FILES; i++) {
+        if (!metadata_names[i].used) {
+            continue;
+        }
+        const char *slash = strrchr(metadata_names[i].filename, '/');
+        if (slash != NULL && strcmp(slash + 1, filename) == 0) {
+            return (int)i;
         }
     }
     return -1;

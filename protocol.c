@@ -27,6 +27,15 @@ const char *nome_do_tipo(uint16_t tipo) {
         case MSG_OK: return "OK";
         case MSG_COORDINATOR: return "COORDINATOR";
         case MSG_LOG_APPEND: return "LOG_APPEND";
+        case MSG_DOWNLOAD_REQ: return "DOWNLOAD_REQ";
+        case MSG_DOWNLOAD_REP: return "DOWNLOAD_REP";
+        case MSG_PREPARE: return "PREPARE";
+        case MSG_COMMIT: return "COMMIT";
+        case MSG_ABORT: return "ABORT";
+        case MSG_SNAPSHOT: return "SNAPSHOT";
+        case MSG_STATE_TRANSFER: return "STATE_TRANSFER";
+        case MSG_VOTE_YES: return "YES";
+        case MSG_VOTE_NO: return "NO";
         default: return "UNKNOWN";
     }
 }

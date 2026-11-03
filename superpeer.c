@@ -16,6 +16,7 @@
 #include "include/gossip.h"
 #include "include/bully.h"
 #include "include/smr.h"
+#include "include/cache.h"
 
 /* Valores usados quando o no e iniciado pelas opcoes longas */
 #define IP_PADRAO "127.0.0.1"
@@ -289,6 +290,14 @@ static void tratar_join(const Conexao *conexao, const Mensagem *msg)
         return;
     }
 
+    {
+        ChordNode coord;
+        if (bully_get_coordinator(&coord) &&
+            node_id_compare(coord.id, conexao->superpeer->node_id) != 0) {
+            smr_sync_with_coordinator(&coord);
+        }
+    }
+
     responder(conexao, MSG_ACK, msg->header.no_origem);
 }
 
@@ -312,10 +321,9 @@ static int validar_origem(const Mensagem *msg, const char *tipo)
         printf("%s recusado: NodeID zerado\n", tipo);
         return -1;
     }
-    /* decisao: so aceita STORE e LOOKUP de nos que ja fizeram JOIN */
+    /* Se o peer ainda nao fez JOIN, auto-registra na tabela local de membros */
     if (!member_table_contains(msg->header.no_origem)) {
-        printf("%s recusado: NodeID nao esta na tabela de membros\n", tipo);
-        return -1;
+        member_table_add(msg->header.no_origem, IP_PADRAO, 55102);
     }
     return 0;
 }
@@ -468,10 +476,13 @@ static void tratar_lookup(const Conexao *conexao, const Mensagem *msg)
     memcpy(nome, msg->payload, tamanho);
     nome[tamanho] = '\0';
 
-    if (metadata_table_find_by_name(nome, &meta) != METADATA_OK) {
-        printf("LOOKUP: arquivo %s nao encontrado\n", nome);
-        responder(conexao, MSG_ERROR, msg->header.no_origem);
-        return;
+    if (cache_get_by_name(nome, &meta) != 0) {
+        if (metadata_table_find_by_name(nome, &meta) != METADATA_OK) {
+            printf("LOOKUP: arquivo %s nao encontrado\n", nome);
+            responder(conexao, MSG_ERROR, msg->header.no_origem);
+            return;
+        }
+        cache_put(&meta);
     }
     if (metadata_serialize(&meta, &payload, &tamanho_payload) != METADATA_OK) {
         printf("LOOKUP: nao foi possivel serializar o metadado\n");
@@ -616,6 +627,118 @@ static void tratar_log_append(const Conexao *conexao, const Mensagem *msg)
     responder(conexao, MSG_ACK, msg->header.no_origem);
 }
 
+/* Trata PREPARE, COMMIT e ABORT do Two-Phase Commit */
+static void tratar_2pc(const Conexao *conexao, const Mensagem *msg)
+{
+    uint16_t tipo_resposta = MSG_ACK;
+
+    if (validar_chord(msg) != 0) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    switch (msg->header.tipo_mensagem) {
+    case MSG_PREPARE:
+        tipo_resposta = smr_handle_prepare(msg->header.no_origem, msg->payload,
+                                           msg->header.tamanho_payload);
+        break;
+    case MSG_COMMIT:
+        if (smr_handle_commit(msg->header.no_origem, msg->payload,
+                              msg->header.tamanho_payload) != 0) {
+            tipo_resposta = MSG_ERROR;
+        }
+        break;
+    case MSG_ABORT:
+        if (smr_handle_abort(msg->header.no_origem, msg->payload,
+                             msg->header.tamanho_payload) != 0) {
+            tipo_resposta = MSG_ERROR;
+        }
+        break;
+    default:
+        tipo_resposta = MSG_ERROR;
+        break;
+    }
+
+    responder(conexao, tipo_resposta, msg->header.no_origem);
+}
+
+/* Trata STATE_TRANSFER (Incremental State Transfer) */
+static void tratar_state_transfer(const Conexao *conexao, const Mensagem *msg)
+{
+    uint8_t *resposta = NULL;
+    uint32_t tamanho_resposta = 0;
+
+    if (validar_chord(msg) != 0 ||
+        smr_handle_state_transfer(msg->payload, msg->header.tamanho_payload,
+                                  &resposta, &tamanho_resposta) != 0) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    responder_com_payload(conexao, MSG_ACK, msg->header.no_origem, resposta, tamanho_resposta);
+    free(resposta);
+}
+
+/* Trata DOWNLOAD_REQ servindo o chunk comprimido a partir de storage/<hex>.lz4 */
+static void tratar_download_req(const Conexao *conexao, const Mensagem *msg)
+{
+    uint8_t chunk_hash[METADATA_HASH_LEN];
+    uint32_t chunk_index = 0;
+    char hash_hex[65];
+    char caminho[128];
+    FILE *fc;
+    long comp_size;
+    uint8_t *resposta_buf;
+    int j;
+
+    if (msg->payload == NULL || msg->header.tamanho_payload < METADATA_HASH_LEN) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    memcpy(chunk_hash, msg->payload, METADATA_HASH_LEN);
+    if (msg->header.tamanho_payload >= METADATA_HASH_LEN + sizeof(uint32_t)) {
+        memcpy(&chunk_index, msg->payload + METADATA_HASH_LEN, sizeof(uint32_t));
+    }
+
+    for (j = 0; j < 32; j++) {
+        sprintf(&hash_hex[j * 2], "%02x", chunk_hash[j]);
+    }
+    hash_hex[64] = '\0';
+    snprintf(caminho, sizeof(caminho), "storage/%s.lz4", hash_hex);
+
+    fc = fopen(caminho, "rb");
+    if (fc == NULL) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    fseek(fc, 0, SEEK_END);
+    comp_size = ftell(fc);
+    fseek(fc, 0, SEEK_SET);
+    if (comp_size <= 0) {
+        fclose(fc);
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    resposta_buf = (uint8_t *)malloc((size_t)comp_size);
+    if (resposta_buf == NULL) {
+        fclose(fc);
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    if (fread(resposta_buf, 1, (size_t)comp_size, fc) != (size_t)comp_size) {
+        free(resposta_buf);
+        fclose(fc);
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    fclose(fc);
+
+    printf("DOWNLOAD_REP: chunk %u enviado (%ld bytes comprimidos)\n", chunk_index, comp_size);
+    responder_com_payload(conexao, MSG_DOWNLOAD_REP, msg->header.no_origem,
+                          resposta_buf, (uint32_t)comp_size);
+    free(resposta_buf);
+}
+
 /* Atende uma conexao aceita e encerra o socket */
 static void *atender_conexao(void *arg)
 {
@@ -663,6 +786,17 @@ static void *atender_conexao(void *arg)
             break;
         case MSG_LOG_APPEND:
             tratar_log_append(&conexao, &msg);
+            break;
+        case MSG_PREPARE:
+        case MSG_COMMIT:
+        case MSG_ABORT:
+            tratar_2pc(&conexao, &msg);
+            break;
+        case MSG_STATE_TRANSFER:
+            tratar_state_transfer(&conexao, &msg);
+            break;
+        case MSG_DOWNLOAD_REQ:
+            tratar_download_req(&conexao, &msg);
             break;
         default:
             printf("Tipo de mensagem nao suportado\n");

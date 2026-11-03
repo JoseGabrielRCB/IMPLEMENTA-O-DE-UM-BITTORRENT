@@ -205,6 +205,10 @@ static void bully_tick(time_t *ultimo_anuncio)
         printf("detect failure: %s (coordenador)\n", copia.coord.name);
         bully_set(BULLY_FOLLOWER, NULL, 0);
         bully_election();
+    } else if (!chord_same(&copia.coord, &bully_self) &&
+               agora - *ultimo_anuncio >= BULLY_ANNOUNCE_SEC) {
+        smr_sync_with_coordinator(&copia.coord);
+        *ultimo_anuncio = agora;
     }
 }
 
@@ -215,9 +219,10 @@ static void *bully_loop(void *arg)
 
     (void)arg;
     sleep(BULLY_START_SEC);
+    bully_election();
     for (;;) {
-        bully_tick(&ultimo_anuncio);
         sleep(BULLY_PERIOD_SEC);
+        bully_tick(&ultimo_anuncio);
     }
     return NULL;
 }
@@ -288,11 +293,12 @@ int bully_handle_coordinator(const uint8_t *payload, uint32_t tamanho)
     if (mudou) {
         printf("COORDINATOR %s\n", no.name);
         printf("Coordenador: %s\n", no.name);
+        smr_sync_with_coordinator(&no);
     }
     return 0;
 }
 
-/* Copia o coordenador atual, se houver */
+/* Copia o coordenador atual; se ainda nao houve eleicao e o no esta isolado, usa si mesmo */
 int bully_get_coordinator(ChordNode *out)
 {
     int tem;
@@ -303,6 +309,12 @@ int bully_get_coordinator(ChordNode *out)
     tem = bully_has_coord;
     if (tem) {
         *out = bully_coord;
+    } else if (bully_state == BULLY_FOLLOWER) {
+        ChordNode membros[1];
+        if (gossip_alive_members(membros, 1) == 0) {
+            *out = bully_self;
+            tem = 1;
+        }
     }
     pthread_mutex_unlock(&bully_mutex);
     return tem;

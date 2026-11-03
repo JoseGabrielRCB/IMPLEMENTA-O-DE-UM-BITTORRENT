@@ -223,6 +223,12 @@ static int gossip_table_merge(const uint8_t *buffer, uint32_t tamanho)
     if (pthread_mutex_lock(&gossip_mutex) != 0) {
         return -1;
     }
+    if (total > 0 && entradas[0].state == GOSSIP_ALIVE) {
+        int idx0 = gossip_find(entradas[0].node.id);
+        if (idx0 >= 0 && entradas[0].heartbeat < gossip_members[idx0].heartbeat) {
+            gossip_members[idx0].heartbeat = 0;
+        }
+    }
     for (i = 0; i < total; i++) {
         gossip_apply(&entradas[i].node, entradas[i].state, entradas[i].heartbeat,
                      entradas[0].node.name);
@@ -405,12 +411,13 @@ int gossip_start(const Node *no, const char *nome, const char *bootstrap_ip,
     return 0;
 }
 
-/* HEARTBEAT: no + contador; renova o prazo de quem enviou */
+/* HEARTBEAT: no + contador; renova o prazo de quem enviou (mesmo apos reinicio) */
 int gossip_handle_heartbeat(const uint8_t *payload, uint32_t tamanho)
 {
     ChordNode no;
     uint64_t heartbeat;
     uint32_t pos = 0;
+    int indice;
 
     if (chord_node_read(payload, tamanho, &pos, &no) != 0 || tamanho - pos != sizeof(uint64_t)) {
         return -1;
@@ -419,6 +426,10 @@ int gossip_handle_heartbeat(const uint8_t *payload, uint32_t tamanho)
 
     if (pthread_mutex_lock(&gossip_mutex) != 0) {
         return -1;
+    }
+    indice = gossip_find(no.id);
+    if (indice >= 0 && heartbeat < gossip_members[indice].heartbeat) {
+        gossip_members[indice].heartbeat = 0;
     }
     gossip_apply(&no, GOSSIP_ALIVE, heartbeat, no.name);
     pthread_mutex_unlock(&gossip_mutex);
