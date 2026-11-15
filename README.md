@@ -42,3 +42,27 @@
 
 ### Para descobrir o dono de um ObjectID (mostra o Lookup path e o Owner):
     ./bin/peer --cmd lookup --object-id <64 caracteres hex> --host 127.0.0.1 --port 5101
+
+# CHECKPOINT 4 — Eleição Bully e Replicação SMR
+
+### Executar bateria automatizada do Checkpoint 4:
+    bash tests/c4/run.sh
+
+# CHECKPOINT 5 — Cache LFU, Transferência Paralela, 2PC e IST
+
+### Executar bateria automatizada do Checkpoint 5:
+    bash tests/c5/run.sh
+
+### Consultar metadados ativando a Cache LFU:
+    ./bin/peer --cmd lookup --name documento_a.pdf --host 127.0.0.1 --port 5101
+
+# CHECKPOINT 6 — Integração e Teste Final (Aluno 1 + Aluno 2)
+
+### Executar bateria completa de integração final (12 verificações):
+    bash tests/c6/run.sh
+
+### Upload, Lookup com Cache LFU e Download Paralelo Multi-Réplica:
+    ./bin/peer --cmd upload --file tests/data/documento_c.pdf --host 127.0.0.1 --port 5101
+    ./bin/peer --cmd lookup --name documento_c.pdf --host 127.0.0.1 --port 5102
+    ./bin/peer --cmd download --name documento_c.pdf --output /tmp/saida.pdf --host 127.0.0.1 --port 5103
+

@@ -125,4 +125,20 @@ Antes cada binario era uma unidade de compilação so, com #include dos .c ,agor
 * **chord.h** : ChordNode, a serialização do no, *chord_start()* e os *chord_handle_*()* de cada mensagem.
 * **gossip.h** : *gossip_start()* e os tratadores de HEARTBEAT e GOSSIP.
 
-O superpeer usa todos (superpeer, node, protocol, network, metadata, chord e gossip) e o peer so node, protocol, network e metadata.
+O superpeer usa todos (superpeer, node, protocol, network, metadata, chord, gossip, bully, smr e cache) e o peer usa node, protocol, network e metadata.
+
+### 12. bully.c (eleição de coordenador - checkpoint 4)
+
+* **Eleição pelo maior NodeID de 256 bits** : envia `MSG_ELECTION` aos nós vivos maiores que `self`, aguarda `MSG_OK` e anuncia o vencedor com `MSG_COORDINATOR`. Reeleição automática quando o coordenador atual entra em `SUSPECT`/`FAILED` no Gossip.
+
+### 13. smr.c (replicação SMR, consenso 2PC e IST - checkpoints 4, 5 e 6)
+
+* **SMR (State Machine Replication)** : log replicado determinístico (`LOG #1`, `LOG #2`...) com `TransactionID` de 128 bits, relógio lógico de Lamport, versão e checksum SHA-256.
+* **2PC (Two-Phase Commit)** : Fase 1 (`MSG_PREPARE` -> `MSG_VOTE_YES` / `MSG_VOTE_NO`) e Fase 2 (`MSG_COMMIT` unânime ou `MSG_ABORT` em caso de voto `NO` ou falha).
+* **IST (Incremental State Transfer)** : sincronização incremental (`MSG_STATE_TRANSFER`) enviando apenas entradas `log_index > last_log_index` para nós atrasados ou recuperados.
+
+### 14. cache.c e peer.c (Cache LFU e Download Paralelo Multi-Réplica - checkpoints 5 e 6)
+
+* **Cache LFU (`cache.c`)** : cache em RAM com capacidade `CACHE_CAPACITY = 8`, protegida por mutex, contadores `frequency` (LFU) e `last_access` (desempate LRU), além de `cache_invalidate()` em atualizações de arquivo.
+* **Transferência Paralela e Failover de Réplicas (`peer.c`)** : dispara 1 thread (`pthread_create`) por chunk de 4 MiB, distribui as requisições `MSG_DOWNLOAD_REQ` em Round-Robin entre as réplicas retornadas pelo `LOOKUP` (`(chunk_index + attempt) % provider_count`), faz failover automático caso uma réplica falhe, verifica o SHA-256 do chunk, descomprime com LZ4 e valida o SHA-256 global do arquivo reconstruído.
+

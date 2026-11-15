@@ -3,11 +3,9 @@ CC = gcc
 CFLAGS = -Wall -Wextra -O2 -pthread
 LDLIBS = -lcrypto -llz4
 
-# objetos de cada executavel
-SUPERPEER_OBJS = build/superpeer.o build/node.o build/protocol.o build/network.o \
-                 build/metadata.o build/chord.o build/gossip.o build/bully.o build/smr.o \
-                 build/cache.o
-PEER_OBJS = build/peer.o build/node.o build/protocol.o build/network.o build/metadata.o
+# objetos de cada executavel (apenas os 5 arquivos .c principais)
+SUPERPEER_OBJS = build/superpeer.o build/node.o build/protocol.o build/network.o
+PEER_OBJS = build/peer.o build/node.o build/protocol.o build/network.o
 
 # regras principais
 all: bin/superpeer bin/peer bin/node bin/client
@@ -23,15 +21,7 @@ build/%.o: %.c | build
 # headers de que cada objeto depende
 build/protocol.o: include/protocol.h
 build/network.o: include/network.h include/protocol.h
-build/node.o: include/node.h
-build/metadata.o: include/metadata.h
-build/chord.o: include/chord.h include/node.h include/network.h include/protocol.h
-build/gossip.o: include/gossip.h include/chord.h include/node.h include/network.h include/protocol.h
-build/bully.o: include/bully.h include/chord.h include/gossip.h include/node.h include/network.h \
-               include/protocol.h include/smr.h include/metadata.h
-build/smr.o: include/smr.h include/metadata.h include/bully.h include/chord.h include/gossip.h \
-             include/node.h include/network.h include/protocol.h include/cache.h
-build/cache.o: include/cache.h include/metadata.h
+build/node.o: include/node.h include/metadata.h
 build/superpeer.o: include/node.h include/network.h include/protocol.h include/metadata.h \
                    include/chord.h include/gossip.h include/bully.h include/smr.h include/cache.h
 build/peer.o: include/node.h include/network.h include/protocol.h include/metadata.h
@@ -40,11 +30,11 @@ build/peer.o: include/node.h include/network.h include/protocol.h include/metada
 bin/superpeer: $(SUPERPEER_OBJS) | bin
 	$(CC) $(CFLAGS) -o $@ $(SUPERPEER_OBJS) $(LDLIBS)
 
-# liga o peer (antigo client.c)
+# liga o peer (cliente P2P)
 bin/peer: $(PEER_OBJS) | bin
 	$(CC) $(CFLAGS) -o $@ $(PEER_OBJS) $(LDLIBS)
 
-# aliases para o teste do professor continuar funcionando sem quebrar
+# aliases para os scripts de teste
 bin/node: bin/superpeer
 	cp bin/superpeer bin/node
 

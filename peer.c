@@ -11,6 +11,7 @@
 
 #include <lz4.h>
 #include <openssl/sha.h>
+#include <openssl/evp.h>
 
 #include "include/node.h"
 #include "include/network.h"
@@ -21,15 +22,22 @@ void calcular_hash_global(const char *caminho, uint8_t *hash_saida)
     FILE *f = fopen(caminho, "rb");
     if (!f)
         return;
-    SHA256_CTX sha256;
-    SHA256_Init(&sha256);  // inicializa a variavel Sha256
-    uint8_t buffer[32768]; // buffer de um tamanho ideal de um cache do processador
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (!ctx)
+    {
+        fclose(f);
+        return;
+    }
+    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
+    uint8_t buffer[32768];
     size_t bytes;
     while ((bytes = fread(buffer, 1, sizeof(buffer), f)) > 0)
     {
-        SHA256_Update(&sha256, buffer, bytes); // incrementar o hash com os bytes lidos de 32kb em 32 ate o fim do arquivo
+        EVP_DigestUpdate(ctx, buffer, bytes);
     }
-    SHA256_Final(hash_saida, &sha256);
+    unsigned int out_len = 0;
+    EVP_DigestFinal_ex(ctx, hash_saida, &out_len);
+    EVP_MD_CTX_free(ctx);
     fclose(f);
 }
 /*
@@ -116,6 +124,8 @@ typedef struct
     uint8_t self_id[NODE_ID_LEN];
     char sp_host[256];
     int sp_port;
+    const ProviderInfo *providers;
+    uint32_t provider_count;
     uint8_t *decomp_buf;
     int decomp_size;
     int status;
@@ -171,6 +181,7 @@ static void *baixar_chunk_thread(void *arg)
     uint8_t calc_hash[32];
     int comp_size = -1;
     int via_rede = 0;
+    char origem_desc[300] = "storage local";
 
     if (!compressed || !buffer)
     {
@@ -180,14 +191,41 @@ static void *baixar_chunk_thread(void *arg)
         return NULL;
     }
 
-    comp_size = requisitar_chunk_rede(t->sp_host, t->sp_port, t->self_id,
-                                      t->chunk_hash, t->chunk_index,
-                                      compressed, max_comp);
-    if (comp_size > 0)
+    if (t->providers != NULL && t->provider_count > 0)
     {
-        via_rede = 1;
+        for (uint32_t attempt = 0; attempt < t->provider_count; attempt++)
+        {
+            uint32_t idx = (t->chunk_index + attempt) % t->provider_count;
+            const ProviderInfo *rep = &t->providers[idx];
+            comp_size = requisitar_chunk_rede(rep->ip, rep->port, t->self_id,
+                                              t->chunk_hash, t->chunk_index,
+                                              compressed, max_comp);
+            if (comp_size > 0)
+            {
+                via_rede = 1;
+                snprintf(origem_desc, sizeof(origem_desc), "DOWNLOAD_REP replica %s:%u",
+                         rep->ip, rep->port);
+                break;
+            }
+            printf("Chunk %u/%u: timeout/falha na replica %s:%u -> selecionando proxima replica\n",
+                   t->chunk_index + 1, t->chunk_count, rep->ip, rep->port);
+        }
     }
-    else
+
+    if (comp_size <= 0)
+    {
+        comp_size = requisitar_chunk_rede(t->sp_host, t->sp_port, t->self_id,
+                                          t->chunk_hash, t->chunk_index,
+                                          compressed, max_comp);
+        if (comp_size > 0)
+        {
+            via_rede = 1;
+            snprintf(origem_desc, sizeof(origem_desc), "DOWNLOAD_REP %s:%d",
+                     t->sp_host, t->sp_port);
+        }
+    }
+
+    if (comp_size <= 0)
     {
         char chunk_path[128];
         char hash_hex[65];
@@ -242,17 +280,20 @@ static void *baixar_chunk_thread(void *arg)
     t->decomp_size = decomp_size;
     t->status = 0;
     printf("Transferencia paralela: chunk %u/%u recebido (%s) e verificado (LZ4 + SHA-256)\n",
-           t->chunk_index + 1, t->chunk_count, via_rede ? "DOWNLOAD_REP" : "storage local");
+           t->chunk_index + 1, t->chunk_count, via_rede ? origem_desc : "storage local");
     return NULL;
 }
 
 void processar_download_paralelo(FileMetadata *meta, const char *output_path,
                                  const char *sp_host, int sp_port,
-                                 const uint8_t self_id[NODE_ID_LEN])
+                                 const uint8_t self_id[NODE_ID_LEN],
+                                 const ProviderInfo *providers, uint32_t provider_count)
 {
     FILE *f_out = fopen(output_path, "wb");
     if (!f_out)
         return;
+
+    printf("Transfer state: CREATED -> QUEUED -> STARTED -> TRANSFERRING\n");
 
     uint32_t n = meta->chunk_count;
     if (n > 0)
@@ -268,6 +309,8 @@ void processar_download_paralelo(FileMetadata *meta, const char *output_path,
             memcpy(tasks[i].self_id, self_id, NODE_ID_LEN);
             snprintf(tasks[i].sp_host, sizeof(tasks[i].sp_host), "%s", sp_host);
             tasks[i].sp_port = sp_port;
+            tasks[i].providers = providers;
+            tasks[i].provider_count = provider_count;
             tasks[i].status = -1;
             pthread_create(&threads[i], NULL, baixar_chunk_thread, &tasks[i]);
         }
@@ -288,10 +331,12 @@ void processar_download_paralelo(FileMetadata *meta, const char *output_path,
 
     fclose(f_out);
 
+    printf("Transfer state: VERIFYING\n");
     uint8_t final_hash[32];
     calcular_hash_global(output_path, final_hash);
     if (memcmp(final_hash, meta->object_id, 32) == 0)
     {
+        printf("Transfer state: FINISHED -> REPLICATED\n");
         printf("Download completed\n");
         printf("SHA-256 verified\n");
     }
@@ -302,7 +347,8 @@ void processar_download_paralelo(FileMetadata *meta, const char *output_path,
 }
 
 // separa o metadado da lista de provedores (count + ProviderInfo) no fim da resposta do LOOKUP
-int separar_provedores(const uint8_t *payload, uint32_t tamanho, uint32_t *tamanho_meta)
+int separar_provedores(const uint8_t *payload, uint32_t tamanho, uint32_t *tamanho_meta,
+                       ProviderInfo providers_out[MAX_PROVIDERS], uint32_t *provider_count_out)
 {
     uint16_t nome_len;
     uint32_t chunk_count;
@@ -310,6 +356,8 @@ int separar_provedores(const uint8_t *payload, uint32_t tamanho, uint32_t *taman
     uint64_t pos;
     uint64_t fim;
 
+    if (provider_count_out != NULL)
+        *provider_count_out = 0;
     if (payload == NULL || tamanho < METADATA_ID_LEN + sizeof(uint16_t))
         return -1;
     memcpy(&nome_len, payload + METADATA_ID_LEN, sizeof(uint16_t));
@@ -325,13 +373,20 @@ int separar_provedores(const uint8_t *payload, uint32_t tamanho, uint32_t *taman
     if (fim != tamanho)
         return -1;
 
+    uint32_t salvos = 0;
     for (uint32_t i = 0; i < provedores; i++)
     {
         ProviderInfo info;
         memcpy(&info, payload + pos + sizeof(uint32_t) + i * sizeof(ProviderInfo), sizeof(info));
         info.ip[sizeof(info.ip) - 1] = '\0';
         printf("Provedor: %s:%u\n", info.ip, info.port);
+        if (providers_out != NULL && salvos < MAX_PROVIDERS)
+        {
+            providers_out[salvos++] = info;
+        }
     }
+    if (provider_count_out != NULL)
+        *provider_count_out = salvos;
     *tamanho_meta = (uint32_t)pos;
     return 0;
 }
@@ -613,7 +668,10 @@ int main(int argc, char *argv[])
             {
                 FileMetadata meta;
                 uint32_t tamanho_meta = 0;
-                if (separar_provedores(resposta.payload, resposta.header.tamanho_payload, &tamanho_meta) == 0 &&
+                ProviderInfo providers[MAX_PROVIDERS];
+                uint32_t provider_count = 0;
+                if (separar_provedores(resposta.payload, resposta.header.tamanho_payload, &tamanho_meta,
+                                       providers, &provider_count) == 0 &&
                     metadata_deserialize(resposta.payload, tamanho_meta, &meta) == METADATA_OK)
                 {
                     if (strcmp(cmd, "download") == 0)
@@ -623,7 +681,8 @@ int main(int argc, char *argv[])
                             snprintf(out_file, sizeof(out_file), "%s", output_param);
                         else
                             snprintf(out_file, sizeof(out_file), "downloaded_%s", name_param);
-                        processar_download_paralelo(&meta, out_file, host, porta, peer.node_id);
+                        processar_download_paralelo(&meta, out_file, host, porta, peer.node_id,
+                                                    providers, provider_count);
                     }
                     else
                     {
