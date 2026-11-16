@@ -1953,6 +1953,16 @@ static GossipMember gossip_members[GOSSIP_MAX];
 static int gossip_count = 0;
 static pthread_mutex_t gossip_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Ligado quando um membro entra ou volta: o coordenador anuncia COORDINATOR no
+ * proximo ciclo do Bully, sem esperar BULLY_ANNOUNCE_SEC (Secoes 2.3 UC-01 e 15.7) */
+static int gossip_novo_membro = 0;
+
+/* Le e desliga o aviso de membro novo */
+static int gossip_take_novo_membro(void)
+{
+    return __atomic_exchange_n(&gossip_novo_membro, 0, __ATOMIC_SEQ_CST);
+}
+
 /* Nome do estado para o log */
 static const char *gossip_state_name(uint8_t state)
 {
@@ -1996,6 +2006,9 @@ static void gossip_apply(const ChordNode *no, uint8_t state, uint64_t heartbeat,
         membro->last_seen = time(NULL);
         printf("Gossip: membro %s (%s:%u) %s\n", no->name, no->ip, no->port,
                gossip_state_name(state));
+        if (state == GOSSIP_ALIVE) {
+            __atomic_store_n(&gossip_novo_membro, 1, __ATOMIC_SEQ_CST);
+        }
         return;
     }
 
@@ -2005,6 +2018,7 @@ static void gossip_apply(const ChordNode *no, uint8_t state, uint64_t heartbeat,
     if (state == GOSSIP_ALIVE && heartbeat > membro->heartbeat) {
         if (membro->state != GOSSIP_ALIVE) {
             printf("Gossip: %s voltou (%s -> ALIVE)\n", no->name, gossip_state_name(membro->state));
+            __atomic_store_n(&gossip_novo_membro, 1, __ATOMIC_SEQ_CST);
         }
         membro->node = *no;
         membro->state = GOSSIP_ALIVE;
@@ -2262,6 +2276,26 @@ static void gossip_round(const GossipStart *inicio, unsigned int *semente)
         gossip_exchange(&alvos[escolhido]);
     } else if (inicio->has_bootstrap) {
         gossip_exchange(&inicio->bootstrap);
+
+        /* Entrada na rede: avisa ja os membros que o bootstrap passou, em vez de esperar a
+         * proxima rodada. Assim o coordenador ve este no e anuncia COORDINATOR logo, e o
+         * no sincroniza (IST) antes de decidir sobre a eleicao de partida. */
+        total = 0;
+        if (pthread_mutex_lock(&gossip_mutex) == 0) {
+            for (i = 0; i < gossip_count; i++) {
+                if (gossip_members[i].state == GOSSIP_ALIVE) {
+                    alvos[total++] = gossip_members[i].node;
+                }
+            }
+            pthread_mutex_unlock(&gossip_mutex);
+        }
+        if (total > 0) {
+            printf("Gossip: entrada anunciada a %d membros (heartbeat %llu)\n", total,
+                   (unsigned long long)heartbeat);
+        }
+        for (i = 0; i < total; i++) {
+            gossip_send_heartbeat(&alvos[i], heartbeat);
+        }
     }
 }
 
@@ -2582,7 +2616,8 @@ static void bully_tick(time_t *ultimo_anuncio)
             bully_election();
         }
     } else if (copia.state == BULLY_COORDINATOR) {
-        if (agora - *ultimo_anuncio >= BULLY_ANNOUNCE_SEC) {
+        /* membro novo ou de volta: anuncia ja, para ele sincronizar sem eleger (15.7) */
+        if (gossip_take_novo_membro() || agora - *ultimo_anuncio >= BULLY_ANNOUNCE_SEC) {
             bully_announce();
             *ultimo_anuncio = agora;
         }
@@ -2599,10 +2634,14 @@ static void bully_tick(time_t *ultimo_anuncio)
     }
 }
 
-/* Na partida, a eleicao so e necessaria sem coordenador vivo ou se este no tem NodeID
- * maior que o dele. Um no que volta e ja recebeu COORDINATOR (por exemplo, no IST)
- * nao deve apagar o coordenador para eleger de novo: durante a eleicao ele recusaria
- * STORE por estar sem coordenador. */
+/* Na partida, decide se este no faz eleicao.
+ * - Sem coordenador vivo conhecido: elege.
+ * - Sistema ainda sem operacoes (nenhum LOG aplicado, montagem do cluster): elege,
+ *   como sempre. O maior NodeID vence, mesmo tendo subido depois (Checkpoint 4).
+ * - Sistema ja em operacao (algum LOG aplicado, recebido pelo IST) e coordenador vivo:
+ *   entra como FOLLOWER, sem eleicao, mesmo tendo NodeID maior. E a Secao 15.7: quem
+ *   volta sincroniza e so participa de nova eleicao se houver outra falha. Tambem evita
+ *   que o no recuse STORE ("sem coordenador") enquanto a eleicao corre. */
 static int bully_start_needs_election(BullySnapshot *copia)
 {
     if (bully_snapshot(copia) != 0) {
@@ -2617,7 +2656,7 @@ static int bully_start_needs_election(BullySnapshot *copia)
     if (!bully_coord_alive(&copia->coord)) {
         return 1;
     }
-    return node_id_compare(bully_self.id, copia->coord.id) > 0;
+    return smr_last_applied() == 0;
 }
 
 /* Rotina periodica: espera a membership e confere a cada BULLY_PERIOD_SEC */
@@ -2631,7 +2670,9 @@ static void *bully_loop(void *arg)
     if (bully_start_needs_election(&copia)) {
         bully_election();
     } else {
-        printf("Bully: coordenador %s ja conhecido, sem eleicao de partida\n", copia.coord.name);
+        printf("Bully: coordenador %s ja conhecido e sistema em operacao (LOG #%llu): "
+               "entra como FOLLOWER, sem eleicao de partida (Secao 15.7)\n", copia.coord.name,
+               (unsigned long long)smr_last_applied());
     }
     for (;;) {
         sleep(BULLY_PERIOD_SEC);

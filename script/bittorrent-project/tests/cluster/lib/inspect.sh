@@ -181,7 +181,11 @@ cmd_coordinator() {
     elif ((mixed)); then
         echo "DIVERGÊNCIA: os Super Peers vivos não concordam sobre o coordenador"
     else
-        echo "todos os vivos reconhecem $agreed (maior NodeID entre os vivos: ${best:-?})"
+        if [[ -n "$best" && "$best" != "$agreed" ]]; then
+            echo "todos os vivos reconhecem $agreed. O maior NodeID vivo é $best: ele voltou com o sistema em operação e entrou como FOLLOWER (Seção 15.7)"
+        else
+            echo "todos os vivos reconhecem $agreed (maior NodeID entre os vivos)"
+        fi
     fi
 }
 

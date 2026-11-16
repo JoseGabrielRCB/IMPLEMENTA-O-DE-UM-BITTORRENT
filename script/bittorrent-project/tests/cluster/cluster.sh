@@ -360,6 +360,9 @@ cmd_logs() {
 
 cmd_clean() {
     local h
+    # os PIDs dos espelhos ficam em out/state: pare-os antes de apagar, senão ficam
+    # órfãos gravando nos logs (linhas duplicadas na próxima subida)
+    for h in "${HOST_LIST[@]}"; do mirror_stop "$h"; done
     if [[ "${1:-}" == "--data" ]]; then
         for h in "${HOST_LIST[@]}"; do
             local -a all=()
