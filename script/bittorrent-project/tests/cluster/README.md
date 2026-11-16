@@ -138,7 +138,8 @@ primeiro erro) e nos arquivos de `batch/`:
 
 ```text
 upload <arquivo>            download <nome> [saída]
-lookup <nome|object-id>     state [host porta]       (topologia Chord do Super Peer)
+lookup <nome|object-id>     delete <nome>            (remoção lógica: Status = REMOVED)
+state [host porta]          (topologia Chord do Super Peer)
 ping|join|leave [host porta]
 sleep <segundos>            help | quit
 ```
@@ -211,9 +212,10 @@ Fases do `final`:
 5. 2PC com um participante fora: uploads de D e E.
 6. IST na volta do nó.
 7. Cache LFU.
-8. Download com `sha256` conferido em duas máquinas.
-9. Chunks e compressão (arquivo de 9 MiB).
-10. Réplica: derruba o dono de A e baixa de novo.
+8. Remoção lógica: `delete` de C vira `DELETE` no log de todos os Super Peers.
+9. Download com `sha256` conferido em duas máquinas.
+10. Chunks e compressão (arquivo de 9 MiB).
+11. Réplica: derruba o dono de A e baixa de novo.
 
 Ao terminar, `run.sh` grava `out/relatorio.md` (fases, métricas de tempo e caminho dos
 logs) e derruba o cluster. `CLUSTER_KEEP=1` deixa tudo de pé.

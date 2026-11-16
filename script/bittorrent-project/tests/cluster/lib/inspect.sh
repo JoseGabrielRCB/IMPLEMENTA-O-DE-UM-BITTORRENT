@@ -199,21 +199,26 @@ ins_load_files() {
     while read -r f v; do
         INS_FILES[$f]="$v"
     done < <(ins_cat "$1" 2>/dev/null | awk '
-        substr($0, 1, 4) == "PUT " { s = substr($0, 5); sub(/.*\//, "", s); n[s]++ }
-        END { for (k in n) print k, n[k] }')
+        substr($0, 1, 4) == "PUT "    { s = substr($0, 5); sub(/.*\//, "", s); n[s]++; on[s] = 1 }
+        substr($0, 1, 7) == "DELETE " { s = substr($0, 8); sub(/.*\//, "", s); n[s]++; on[s] = 0 }
+        END { for (k in n) print k, (on[k] ? n[k] : n[k] "-removido") }')
 }
 
 # Estado replicado de um nó tirado do log: "idx objetos hits misses evictions".
 ins_state_of() {
     ins_cat "$1" 2>/dev/null | awk '
         /^LOG #[0-9]+$/ { idx = substr($0, 6) + 0 }
-        substr($0, 1, 4) == "PUT " { s = substr($0, 5); sub(/.*\//, "", s); if (!(s in seen)) { seen[s] = 1; obj++ } }
+        substr($0, 1, 4) == "PUT "    { s = substr($0, 5); sub(/.*\//, "", s); on[s] = 1 }
+        substr($0, 1, 7) == "DELETE " { s = substr($0, 8); sub(/.*\//, "", s); on[s] = 0 }
         /^LFU CACHE/ || /^LFU Cache stats/ {
             if (match($0, /hits=[0-9]+/)) hits = substr($0, RSTART + 5, RLENGTH - 5)
             if (match($0, /misses=[0-9]+/)) miss = substr($0, RSTART + 7, RLENGTH - 7)
             if (match($0, /evictions=[0-9]+/)) ev = substr($0, RSTART + 10, RLENGTH - 10)
         }
-        END { print idx + 0, obj + 0, (hits == "" ? "-" : hits), (miss == "" ? "-" : miss), (ev == "" ? "-" : ev) }'
+        END {
+            for (s in on) if (on[s]) obj++
+            print idx + 0, obj + 0, (hits == "" ? "-" : hits), (miss == "" ? "-" : miss), (ev == "" ? "-" : ev)
+        }'
 }
 
 # LogIndex, objetos e cache LFU de cada Super Peer, pelo log.
@@ -256,7 +261,7 @@ cmd_state() {
     else
         echo "DIVERGÊNCIA: LogIndex ou número de objetos diferem entre os vivos (SMR propagando, ou nó atrasado)"
     fi
-    echo "Fonte: último 'LOG #n', nomes dos 'PUT' e contadores do LFU no log da vida atual de cada nó."
+    echo "Fonte: último 'LOG #n', 'PUT'/'DELETE' (remoção lógica) e contadores do LFU no log da vida atual de cada nó."
 
     if ((files)); then
         echo

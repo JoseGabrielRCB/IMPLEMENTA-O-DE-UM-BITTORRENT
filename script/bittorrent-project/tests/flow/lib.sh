@@ -129,6 +129,12 @@ function put_name(line,    s) {
     s = substr(line, 5)
     sub(/.*\//, "", s)
     return s
+}
+function del_name(line,    s) {
+    if (substr(line, 1, 7) != "DELETE ") return ""
+    s = substr(line, 8)
+    sub(/.*\//, "", s)
+    return s
 }'
 
 # 2PC no log do coordenador: "2PC [IDLE -> PREPARING] LOG #<idx>", <expect> votos
@@ -289,8 +295,9 @@ assert_name_absent() {
     say "$(basename "$file") não tem PUT $name"
 }
 
-# Estado replicado tirado do log: último LOG #, quantos nomes distintos e quais.
-# Imprime "LogIndex <n>", "Objects: <k>" e "<nome> v<versões>" (uma linha por nome).
+# Estado replicado tirado do log: último LOG #, quantos nomes ativos e quais.
+# Imprime "LogIndex <n>", "Objects: <k>" e "<nome> v<versões>" (uma linha por nome
+# ativo). Um DELETE (remoção lógica) tira o nome dos ativos; um PUT depois o reativa.
 log_state() {
     local file="$1"
     awk "$AWK_PUT"'
@@ -300,12 +307,20 @@ log_state() {
             if (f != "") {
                 if (!(f in seen)) { order[++k] = f }
                 seen[f]++
+                ativo[f] = 1
+            }
+            f = del_name($0)
+            if (f != "") {
+                seen[f]++
+                ativo[f] = 0
             }
         }
         END {
             print "LogIndex " (idx + 0)
-            print "Objects: " (k + 0)
-            for (i = 1; i <= k; i++) { print order[i] " v" seen[order[i]] }
+            n = 0
+            for (i = 1; i <= k; i++) { if (ativo[order[i]]) n++ }
+            print "Objects: " n
+            for (i = 1; i <= k; i++) { if (ativo[order[i]]) print order[i] " v" seen[order[i]] }
         }
     ' < <(logical_log <"$file")
 }

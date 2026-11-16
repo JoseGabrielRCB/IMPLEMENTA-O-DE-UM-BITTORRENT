@@ -123,6 +123,19 @@ for n in "${NODE_LIST[@]}"; do
 done
 phase_done "${LFU_LAST#LFU CACHE }"
 
+phase "Remoção lógica (Seção 8.4): $C1 remove C, que vira DELETE no log via 2PC"
+cdo "$C1" delete documento_c.pdf
+mirror_sync "${NODE_LIST[@]}" || die "espelho de log atrasado"
+for n in "${NODE_LIST[@]}"; do
+    assert_lines_in_order "$(node_log "$n")" '^LOG #6$' "^DELETE (.*/)?documento_c\\.pdf\$"
+    cl_assert_state "$n" 6 4 documento_a.pdf documento_b.pdf documento_d.pdf documento_e.pdf
+done
+say "$C1> lookup documento_c.pdf (deve falhar: o registro está REMOVED)"
+if client_do "$C1" lookup documento_c.pdf; then
+    die "lookup de C respondeu depois da remoção lógica"
+fi
+phase_done "LOG #6 DELETE em todos; C fora dos objetos; lookup de C recusado"
+
 phase "Download: A por $C1 e por $C_OTHER (outra máquina), comparando o sha256"
 download_and_check "$C1" documento_a.pdf a-c1.out documento_a.pdf
 download_and_check "$C_OTHER" documento_a.pdf a-other.out documento_a.pdf

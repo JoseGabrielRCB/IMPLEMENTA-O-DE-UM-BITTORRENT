@@ -92,6 +92,8 @@ def sp_state(name, logs_dir):
             st.log_index = int(t[5:])
         elif t.startswith("PUT "):
             st.objects.add(_basename(t[4:]))
+        elif t.startswith("DELETE "):
+            st.objects.discard(_basename(t[7:]))  # remoção lógica
         elif t.startswith("LFU CACHE") or t.startswith("LFU Cache stats"):
             for k, rx in _NUM.items():
                 m = rx.search(t)
