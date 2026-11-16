@@ -31,7 +31,7 @@ set sp_port_base     5100
 host m1 local dir=/tmp/bt-local
 ```
 
-**No laboratório**, uma linha `host` por máquina (ver `cluster.conf.example` e o `README.md` do harness). Antes da primeira vez, pelo terminal:
+**No laboratório**, uma linha `host` por máquina — o passo a passo completo está na **Parte E**. Resumo, pelo terminal:
 
 ```bash
 cd script/bittorrent-project/tests/cluster
@@ -366,3 +366,165 @@ Rode **Cenários → `final`** (2 minutos) para mostrar tudo de uma vez com veri
 | Upload logo depois de um `kill -9` falha | O 2PC ainda conta com o nó caído até a detecção (~15 s). Espere o SUSPECT. |
 | O coordenador mudou depois de um `up` | Cada `up` apaga os `.uuid` e gera NodeIDs novos. Para reiniciar um nó mantendo o NodeID, use **start/restart**, nunca um `up` novo. |
 | `tests/c6` deu 28/29 em "ELECTION enviada…" | Corrida de detecção, não erro do sistema (docs/cp6, seção 8.4). Rode de novo. |
+
+---
+
+## Parte E — Passo a passo no laboratório (várias máquinas)
+
+Tempo estimado na primeira vez: 20–30 minutos. Depois, só os passos E.6 em diante.
+
+### E.1 Como as peças se encaixam
+
+```text
+             máquina do OPERADOR (você)                    máquinas do CLUSTER
+   ┌──────────────────────────────────────────┐        ┌──────────────────────┐
+   │ repositório + cluster.sh + interface      │  ssh   │ m1: SP1 SP2 SP3 C1 C2│
+   │ logs espelhados em cluster/logs/          │ ─────► │ m2: SP4 SP5 SP6 C3 C4│
+   │ (pode ser também uma das máquinas)        │        │ m3: ...              │
+   └──────────────────────────────────────────┘        └──────────────────────┘
+```
+
+- Você só trabalha na **máquina do operador**. O `deploy` copia o código para as outras por ssh e compila lá; ninguém precisa abrir terminal nas outras máquinas.
+- A máquina do operador pode ser um PC do laboratório ou um notebook **na mesma rede**, e pode também rodar Super Peers.
+
+### E.2 Antes de ir ao laboratório
+
+1. Envie tudo ao GitHub (`git push origin checkpoint-6`), ou leve a pasta num pendrive.
+2. Se possível, ensaie com **duas** máquinas quaisquer da mesma rede (seu PC e um notebook): pega problemas de ssh e firewall antes do dia.
+3. Combine com o técnico, se ninguém tiver `sudo`: as máquinas precisam de `gcc`, `make`, `libssl-dev` e `liblz4-dev`, do **ssh ligado** e das **portas 5101 em diante liberadas** entre elas.
+
+### E.3 Escolher as máquinas e anotar IP e usuário
+
+Em **cada** máquina que vai participar (inclusive a do operador, se ela for rodar Super Peers):
+
+```bash
+hostname -I     # o IP da rede, ex.: 192.168.0.21 (ignore 127.x e 172.17.x)
+whoami          # o usuário, ex.: aluno
+```
+
+Monte uma tabela no papel: `m1 = aluno@192.168.0.21`, `m2 = aluno@192.168.0.22`, …
+
+### E.4 Preparar a máquina do operador
+
+```bash
+git clone https://github.com/JoseGabrielRCB/IMPLEMENTA-O-DE-UM-BITTORRENT.git
+cd IMPLEMENTA-O-DE-UM-BITTORRENT
+git checkout checkpoint-6
+make                                   # confere que compila aqui também
+sudo apt install -y sshpass tmux       # copy-keys e watch.sh (se tiver sudo)
+sudo apt install -y python3-tk python3-venv python3-pip   # só para a interface
+```
+
+Teste o ssh na mão para uma das máquinas: `ssh aluno@192.168.0.22 hostname`. Se pedir senha e responder o nome da máquina, está ok. Se der *Connection refused*, o ssh está desligado nela (fale com o técnico).
+
+### E.5 Escrever o `cluster.conf`
+
+```bash
+cd script/bittorrent-project/tests/cluster
+cp cluster.conf.example cluster.conf
+nano cluster.conf
+```
+
+Exemplo com 4 máquinas, 1 Super Peer e 2 clientes em cada (4 SPs no total, como nos Checkpoints 4 e 5):
+
+```text
+set sp_per_host      1
+set clients_per_host 2
+set sp_port_base     5100
+host m1  aluno@192.168.0.21  dir=/tmp/bt-m1
+host m2  aluno@192.168.0.22  dir=/tmp/bt-m2
+host m3  aluno@192.168.0.23  dir=/tmp/bt-m3
+host m4  aluno@192.168.0.24  dir=/tmp/bt-m4
+```
+
+Regras que evitam os erros mais comuns:
+
+- **Use sempre o IP**, não o nome da máquina (o nome pode resolver para `127.0.1.1`).
+- **`dir=` com uma pasta local diferente por máquina** (`/tmp/bt-mN`): se a pasta pessoal for compartilhada entre os PCs (NFS), sem isso todas gravariam no mesmo lugar.
+- Se a máquina do operador também roda Super Peers, use `host m1 local ip=<IP dela> dir=/tmp/bt-m1` — **o `ip=` é obrigatório** (sem ele seria 127.0.0.1, e o `list` recusa).
+- Para 5 Super Peers como no Checkpoint 3, use `sps=2` numa das linhas, ou `set sp_per_host 2` com menos máquinas.
+
+Confira a topologia gerada (não usa a rede):
+
+```bash
+./cluster.sh list
+```
+
+Deve listar as máquinas com os IPs corretos e os Super Peers SP1…SPn com `ip:porta`.
+
+### E.6 Chaves ssh (uma vez por máquina do operador)
+
+```bash
+./cluster.sh copy-keys          # pede a senha do laboratório uma vez
+./cluster.sh copy-keys --per-host   # se cada máquina tiver uma senha diferente
+```
+
+Ele cria `~/.ssh/id_ed25519` se não existir e instala a chave nas máquinas em que ela ainda não funciona. A senha não é gravada. Depois disso, nenhum comando pede senha.
+
+### E.7 Diagnóstico
+
+```bash
+./cluster.sh check
+```
+
+Cada máquina deve terminar com `ok (ssh, ferramentas, bibliotecas e cabeçalhos, portas livres)`. Como ler os avisos:
+
+| Mensagem | O que fazer |
+|---|---|
+| `ssh falhou em …` | Rode `copy-keys`; confira IP e usuário no `cluster.conf`. |
+| `falta: gcc` / `make` | Instalar `build-essential` (técnico). |
+| `falta: lz4.h(pacote -dev)` / `falta: openssl/sha.h(pacote -dev)` | Instalar `liblz4-dev` / `libssl-dev`. |
+| `porta 5101 já está em uso` | Outro processo usa a porta (outro grupo?). Mude `set sp_port_base` (ex.: 6100). |
+| `AVISO: relógio com mais de 2 s de diferença` | Não impede o funcionamento (os logs são carimbados na máquina do operador); só registre. |
+
+### E.8 Enviar o código e compilar
+
+```bash
+./cluster.sh deploy
+```
+
+Para cada máquina: `código enviado`, `compilado`, `arquivos de teste enviados`. Se a compilação falhar numa máquina, a mensagem do `gcc` aparece com o nome dela (quase sempre biblioteca faltando — volte ao E.7).
+
+### E.9 Rede entre as máquinas
+
+```bash
+./cluster.sh up        # sobe só os Super Peers
+./cluster.sh net       # cada máquina tenta abrir conexão com cada Super Peer
+```
+
+Esperado: `alcança os N Super Peers` em todas. Se aparecer `sem alcance: SP3 192.168.0.23:5103`, há firewall bloqueando aquela porta — peça para liberar as portas `sp_port_base+1` em diante, ou teste outra base de portas.
+
+### E.10 Teste rápido entre máquinas
+
+```bash
+./run.sh smoke
+```
+
+Faz upload num cliente e download num cliente de **outra máquina**, conferindo o `sha256`, e verifica o `LOG #1` em todos. Termina com `FAIL: 0` e grava `out/relatorio.md`. Se passou, o laboratório está pronto.
+
+### E.11 Usar
+
+- **Interface:** `./gui/run.sh` → **Cluster → up + clientes** e siga as Partes B e C. Num cluster de várias máquinas, o `kill -9` derruba um processo em outro PC, e o download pode vir de outra máquina.
+- **Terminal, com painéis:** `./watch.sh final` (precisa de `tmux`) mostra o cenário final num painel e o log de cada Super Peer em outro.
+- **Só o roteiro automático:** `./run.sh final`.
+- **Baterias do professor/repositório** (em uma máquina só, como foram escritas): `bash tests/c6/run.sh` na raiz do repositório.
+
+### E.12 Ao terminar
+
+```bash
+./cluster.sh down      # fecha clientes e Super Peers em todas as máquinas
+./cluster.sh clean --data   # opcional: apaga logs locais e as pastas run/ remotas
+```
+
+Os logs da execução ficam em `cluster/logs/` (um arquivo por processo e por vida) e o relatório em `cluster/out/relatorio.md` — bons para anexar à documentação.
+
+### E.13 Problemas típicos de laboratório
+
+| Situação | Solução |
+|---|---|
+| Sem `sudo` para instalar nada | As máquinas do cluster precisam só de `gcc`, `make`, `libssl-dev`, `liblz4-dev` (peça ao técnico). Sem `sshpass`, faça `ssh-copy-id aluno@IP` à mão para cada máquina. Sem `python3-tk`, use o terminal (`run.sh`, `watch.sh`). |
+| `list` recusa com "IP … (loopback)" | Defina `ip=<IP da rede>` na linha daquele host (E.5). |
+| Funciona numa máquina só, mas não entre máquinas | Rode `./cluster.sh net`: é firewall ou IP errado no `cluster.conf`. |
+| A home é compartilhada (NFS) | Use `dir=/tmp/bt-mN` diferente em cada linha `host`. |
+| Outro grupo usando as mesmas máquinas | Mudem as portas (`set sp_port_base 6100`) e as pastas (`dir=`). |
+| Uma máquina reiniciou no meio | `./cluster.sh status` mostra quem caiu; `./cluster.sh start SPx` religa (o NodeID é mantido). Se `/tmp` foi apagado, rode `deploy` de novo. |

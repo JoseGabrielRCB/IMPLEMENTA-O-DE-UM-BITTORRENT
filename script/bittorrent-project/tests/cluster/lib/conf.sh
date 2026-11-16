@@ -212,6 +212,16 @@ conf_validate() {
         conf_err "${#NODE_LIST[@]} Super Peers; o parser de roster aceita no máximo $ROSTER_MAX"
         rc=1
     fi
+    # Com várias máquinas, um IP de loopback (host 'local' sem ip=, ou um nome que
+    # resolve para 127.0.1.1) seria anunciado aos outros nós e ninguém o alcançaria.
+    if ((${#HOST_LIST[@]} > 1)); then
+        for h in "${HOST_LIST[@]}"; do
+            if [[ "${HOST_IP[$h]}" == 127.* ]]; then
+                conf_err "host $h ficou com o IP ${HOST_IP[$h]} (loopback), mas o cluster tem várias máquinas: defina ip=<IP da rede> na linha do host"
+                rc=1
+            fi
+        done
+    fi
     for name in "${NODE_LIST[@]}"; do
         h="${NODE_HOST[$name]}"
         port="${NODE_PORT[$name]}"
