@@ -285,14 +285,17 @@ static void *baixar_chunk_thread(void *arg)
     return NULL;
 }
 
-void processar_download_paralelo(FileMetadata *meta, const char *output_path,
+int processar_download_paralelo(FileMetadata *meta, const char *output_path,
                                  const char *sp_host, int sp_port,
                                  const uint8_t self_id[NODE_ID_LEN],
                                  const ProviderInfo *providers, uint32_t provider_count)
 {
     FILE *f_out = fopen(output_path, "wb");
     if (!f_out)
-        return;
+    {
+        printf("Erro: nao foi possivel criar %s\n", output_path);
+        return -1;
+    }
 
     printf("Transfer state: CREATED -> QUEUED -> STARTED -> TRANSFERRING\n");
 
@@ -340,11 +343,10 @@ void processar_download_paralelo(FileMetadata *meta, const char *output_path,
         printf("Transfer state: FINISHED -> REPLICATED\n");
         printf("Download completed\n");
         printf("SHA-256 verified\n");
+        return 0;
     }
-    else
-    {
-        printf("Erro: SHA-256 global do arquivo reconstituido diverge do ObjectID\n");
-    }
+    printf("Erro: SHA-256 global do arquivo reconstituido diverge do ObjectID\n");
+    return -1;
 }
 
 /* Depois do STORE confirmado, envia cada chunk comprimido ao Super Peer (CHUNK_STORE),
@@ -482,155 +484,36 @@ int ler_object_id(const char *hex, uint8_t object_id[NODE_ID_LEN])
     return 0;
 }
 
-int main(int argc, char *argv[])
+/* Executa um comando contra o Super Peer host:porta e devolve 0 em caso de sucesso.
+ * Os campos que o comando nao usa podem vir vazios. */
+static int executar_comando(Node *peer, const char *host, int porta, const char *cmd,
+                            const char *file_param, const char *name_param,
+                            const char *output_param, const char *object_id_param)
 {
-    char host[256] = "127.0.0.1";
-    int porta = 55101;
-    char cmd[256] = "ping";
-
-    char file_param[256] = "";
-    char name_param[256] = "";
-    char output_param[256] = "";
-    char object_id_param[256] = "";
     uint8_t object_id[NODE_ID_LEN];
-
-    // identidade do proprio peer, com valores padrao
-    char ip_local[NODE_IP_LEN] = "127.0.0.1";
-    char porta_local[8] = "55102";
-    char arquivo_uuid[NODE_PATH_LEN] = "peer.uuid";
-    NodeConfig config;
-    Node peer;
     char endereco[32];
+    int rc = 1;
 
-    struct option long_options[] = {
-        {"cmd", required_argument, 0, 'c'},
-        {"host", required_argument, 0, 'h'},
-        {"port", required_argument, 0, 'p'},
-        {"ip", required_argument, 0, 'i'},
-        {"myport", required_argument, 0, 'm'},
-        {"uuid", required_argument, 0, 'u'},
-        {"file", required_argument, 0, 'f'},
-        {"name", required_argument, 0, 'n'},
-        {"output", required_argument, 0, 'o'},
-        {"object-id", required_argument, 0, 'x'},
-        {0, 0, 0, 0}};
-
-    // leitura dos parametros de disparo (adaptado para ser o peer/cliente)
-    int opt;
-    while ((opt = getopt_long(argc, argv, "c:h:p:i:m:u:f:n:o:x:", long_options, NULL)) != -1)
-    {
-        switch (opt)
-        {
-        case 'c':
-            snprintf(cmd, sizeof(cmd), "%s", optarg);
-            break;
-        case 'h':
-            snprintf(host, sizeof(host), "%s", optarg);
-            break;
-        case 'p':
-            porta = atoi(optarg);
-            break;
-        case 'i':
-            snprintf(ip_local, sizeof(ip_local), "%s", optarg);
-            break;
-        case 'm':
-            snprintf(porta_local, sizeof(porta_local), "%s", optarg);
-            break;
-        case 'u':
-            snprintf(arquivo_uuid, sizeof(arquivo_uuid), "%s", optarg);
-            break;
-        case 'f':
-            snprintf(file_param, sizeof(file_param), "%s", optarg);
-            break;
-        case 'n':
-            snprintf(name_param, sizeof(name_param), "%s", optarg);
-            break;
-        case 'o':
-            snprintf(output_param, sizeof(output_param), "%s", optarg);
-            break;
-        case 'x':
-            snprintf(object_id_param, sizeof(object_id_param), "%s", optarg);
-            break;
-        }
-    }
-
-    if (optind < argc)
-    {
-        if (strcmp(argv[optind], "upload") == 0 && optind + 1 < argc)
-        {
-            snprintf(cmd, sizeof(cmd), "upload");
-            snprintf(file_param, sizeof(file_param), "%s", argv[optind + 1]);
-        }
-        else if (strcmp(argv[optind], "download") == 0 && optind + 1 < argc)
-        {
-            snprintf(cmd, sizeof(cmd), "download");
-            snprintf(name_param, sizeof(name_param), "%s", argv[optind + 1]);
-        }
-        else if (strcmp(argv[optind], "join") == 0)
-        {
-            snprintf(cmd, sizeof(cmd), "join");
-        }
-        else if (strcmp(argv[optind], "leave") == 0)
-        {
-            snprintf(cmd, sizeof(cmd), "leave");
-        }
-        else if (strcmp(argv[optind], "ping") == 0)
-        {
-            snprintf(cmd, sizeof(cmd), "ping");
-        }
-    }
-
-    // Os comandos upload e download serao executados apos a conexao com o superpeer
-
-    // monta e valida a configuracao antes de gerar o NodeID
-    memset(&config, 0, sizeof(config));
-    config.role = ROLE_PEER;
-    if (node_parse_ip(ip_local, config.ip, sizeof(config.ip)) != 0)
-    {
-        fprintf(stderr, "Erro: IP invalido: %s\n", ip_local);
-        return 1;
-    }
-    if (node_parse_port(porta_local, &config.port) != 0)
-    {
-        fprintf(stderr, "Erro: porta invalida: %s\n", porta_local);
-        return 1;
-    }
     if (strcmp(cmd, "lookup") == 0 && strlen(name_param) == 0 &&
         ler_object_id(object_id_param, object_id) != 0)
     {
         fprintf(stderr, "Erro: --object-id precisa de 64 caracteres hex\n");
         return 1;
     }
-    if (porta < 1 || porta > 65535)
-    {
-        fprintf(stderr, "Erro: porta do superpeer invalida: %d\n", porta);
-        return 1;
-    }
-    if (node_parse_ip(host, config.superpeer_ip, sizeof(config.superpeer_ip)) != 0)
-    {
-        fprintf(stderr, "Erro: IP do superpeer invalido: %s\n", host);
-        return 1;
-    }
-    config.superpeer_port = (uint16_t)porta;
-    snprintf(config.uuid_path, sizeof(config.uuid_path), "%s", arquivo_uuid);
 
-    if (node_init(&peer, &config) != 0)
-    {
-        return 1;
-    }
-    // node_print removido para limpar o terminal
-
-    peer.state = STATE_CONNECTING;
+    peer->state = STATE_CONNECTING;
     int socket_fd = conectar_no_servidor(host, porta);
     if (socket_fd < 0 && porta == 55101)
     {
         porta = 5101;
-        config.superpeer_port = (uint16_t)porta;
         socket_fd = conectar_no_servidor(host, porta);
     }
     if (socket_fd < 0)
+    {
+        printf("Erro: nao foi possivel conectar ao Super Peer %s:%d\n", host, porta);
         return 1;
-    peer.state = STATE_CONNECTED;
+    }
+    peer->state = STATE_CONNECTED;
 
     // formata pacote com o tamanho exato da string usada
     Mensagem msg;
@@ -638,7 +521,7 @@ int main(int argc, char *argv[])
     msg.header.versao_protocolo = 1;
 
     // identifica a origem do pacote com o NodeID do peer
-    memcpy(msg.header.no_origem, peer.node_id, NODE_ID_LEN);
+    memcpy(msg.header.no_origem, peer->node_id, NODE_ID_LEN);
 
     if (strcmp(cmd, "ping") == 0)
     {
@@ -648,7 +531,7 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(cmd, "join") == 0)
     {
-        snprintf(endereco, sizeof(endereco), "%s:%u", peer.ip, peer.port);
+        snprintf(endereco, sizeof(endereco), "%s:%u", peer->ip, peer->port);
         msg.header.tipo_mensagem = MSG_JOIN;
         msg.header.tamanho_payload = (uint32_t)strlen(endereco);
         msg.payload = (uint8_t *)strdup(endereco);
@@ -724,23 +607,25 @@ int main(int argc, char *argv[])
         memset(&resposta, 0, sizeof(Mensagem));
         if (receber_mensagem(socket_fd, &resposta) == 0)
         {
+            int ack = resposta.header.tipo_mensagem == MSG_ACK;
+
             // topology e lookup recebem o texto pronto do super peer
             if ((msg.header.tipo_mensagem == MSG_TOPOLOGY || msg.header.tipo_mensagem == MSG_CHORD_LOOKUP) &&
-                resposta.header.tipo_mensagem == MSG_ACK && resposta.payload != NULL)
+                ack && resposta.payload != NULL)
             {
                 fwrite(resposta.payload, 1, resposta.header.tamanho_payload, stdout);
+                rc = 0;
             }
-            else if ((msg.header.tipo_mensagem == MSG_TOPOLOGY || msg.header.tipo_mensagem == MSG_CHORD_LOOKUP) &&
-                     resposta.header.tipo_mensagem != MSG_ACK)
+            else if (msg.header.tipo_mensagem == MSG_TOPOLOGY || msg.header.tipo_mensagem == MSG_CHORD_LOOKUP)
             {
                 printf("Erro: super peer respondeu %s\n", nome_do_tipo(resposta.header.tipo_mensagem));
             }
-            else if (msg.header.tipo_mensagem == MSG_STORE && resposta.header.tipo_mensagem == MSG_ACK)
+            else if (msg.header.tipo_mensagem == MSG_STORE && ack)
             {
                 FileMetadata enviado;
                 if (metadata_deserialize(msg.payload, msg.header.tamanho_payload, &enviado) == METADATA_OK)
                 {
-                    enviar_chunks(&enviado, host, porta, peer.node_id);
+                    rc = enviar_chunks(&enviado, host, porta, peer->node_id) == 0 ? 0 : 1;
                     metadata_free(&enviado);
                 }
             }
@@ -748,11 +633,19 @@ int main(int argc, char *argv[])
             {
                 printf("Erro: super peer respondeu %s ao STORE\n", nome_do_tipo(resposta.header.tipo_mensagem));
             }
-            else if (msg.header.tipo_mensagem == MSG_JOIN && resposta.header.tipo_mensagem == MSG_ACK)
+            else if (msg.header.tipo_mensagem == MSG_JOIN)
             {
-                peer.state = STATE_AUTHENTICATED;
+                if (ack)
+                {
+                    peer->state = STATE_AUTHENTICATED;
+                    rc = 0;
+                }
+                else
+                {
+                    printf("Erro: super peer respondeu %s ao JOIN\n", nome_do_tipo(resposta.header.tipo_mensagem));
+                }
             }
-            else if (msg.header.tipo_mensagem == MSG_LOOKUP && resposta.header.tipo_mensagem == MSG_ACK)
+            else if (msg.header.tipo_mensagem == MSG_LOOKUP && ack)
             {
                 FileMetadata meta;
                 uint32_t tamanho_meta = 0;
@@ -769,21 +662,387 @@ int main(int argc, char *argv[])
                             snprintf(out_file, sizeof(out_file), "%s", output_param);
                         else
                             snprintf(out_file, sizeof(out_file), "downloaded_%s", name_param);
-                        processar_download_paralelo(&meta, out_file, host, porta, peer.node_id,
-                                                    providers, provider_count);
+                        rc = processar_download_paralelo(&meta, out_file, host, porta, peer->node_id,
+                                                         providers, provider_count) == 0 ? 0 : 1;
                     }
                     else
                     {
                         metadata_print(&meta);
+                        rc = 0;
                     }
                     metadata_free(&meta);
                 }
+                else
+                {
+                    printf("Erro: resposta invalida ao LOOKUP\n");
+                }
+            }
+            else if (msg.header.tipo_mensagem == MSG_LOOKUP)
+            {
+                printf("Erro: %s nao encontrado (super peer respondeu %s)\n", name_param,
+                       nome_do_tipo(resposta.header.tipo_mensagem));
+            }
+            else
+            {
+                // ping e leave: qualquer resposta conta como sucesso
+                printf("Resposta: %s\n", nome_do_tipo(resposta.header.tipo_mensagem));
+                rc = 0;
             }
         }
+        else
+        {
+            printf("Erro: sem resposta do Super Peer %s:%d\n", host, porta);
+        }
         liberar_mensagem(&resposta);
+    }
+    else
+    {
+        printf("Erro: falha ao enviar ao Super Peer %s:%d\n", host, porta);
     }
 
     liberar_mensagem(&msg);
     close(socket_fd);
-    return 0;
+    return rc;
+}
+
+#define SESSAO_LINHA_MAX 4096
+#define SESSAO_ARGS_MAX 8
+
+// separa a linha em palavras; aspas duplas agrupam uma palavra com espacos
+static int separar_palavras(char *linha, char *args[], int max)
+{
+    int n = 0;
+    char *p = linha;
+
+    while (*p != '\0' && n < max)
+    {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '\0')
+            break;
+        if (*p == '"')
+        {
+            p++;
+            args[n++] = p;
+            while (*p != '\0' && *p != '"')
+                p++;
+        }
+        else
+        {
+            args[n++] = p;
+            while (*p != '\0' && *p != ' ' && *p != '\t')
+                p++;
+        }
+        if (*p != '\0')
+            *p++ = '\0';
+    }
+    return n;
+}
+
+static void sessao_ajuda(void)
+{
+    printf("Comandos:\n"
+           "  upload <arquivo>            download <nome> [saida]\n"
+           "  lookup <nome|object-id>     state [host porta]\n"
+           "  ping|join|leave [host porta]\n"
+           "  sleep <segundos>            help | quit\n");
+}
+
+/* Sessao de varios comandos (--interactive ou --batch) com um NodeID so.
+ * Cada comando termina com "[done N rc=R]"; a sessao abre com [ready] e fecha com [bye]. */
+static int executar_sessao(Node *peer, const char *host, int porta, FILE *entrada,
+                           int para_no_erro)
+{
+    char linha[SESSAO_LINHA_MAX];
+    int numero = 0;
+    int rc_final = 0;
+
+    printf("[ready]\n");
+    fflush(stdout);
+
+    while (fgets(linha, sizeof(linha), entrada) != NULL)
+    {
+        char *args[SESSAO_ARGS_MAX];
+        char *inicio = linha;
+        int argc_cmd;
+        int rc = 0;
+
+        linha[strcspn(linha, "\r\n")] = '\0';
+        while (*inicio == ' ' || *inicio == '\t')
+            inicio++;
+        if (*inicio == '\0' || *inicio == '#')
+            continue;
+
+        argc_cmd = separar_palavras(inicio, args, SESSAO_ARGS_MAX);
+        if (argc_cmd == 0)
+            continue;
+        if (strcmp(args[0], "quit") == 0 || strcmp(args[0], "exit") == 0)
+            break;
+
+        numero++;
+        const char *sp_host = host;
+        int sp_porta = porta;
+
+        if (strcmp(args[0], "help") == 0)
+        {
+            sessao_ajuda();
+        }
+        else if (strcmp(args[0], "sleep") == 0)
+        {
+            if (argc_cmd < 2 || atoi(args[1]) < 0)
+            {
+                printf("uso: sleep <segundos>\n");
+                rc = 2;
+            }
+            else
+            {
+                sleep((unsigned int)atoi(args[1]));
+            }
+        }
+        else if (strcmp(args[0], "upload") == 0)
+        {
+            if (argc_cmd < 2)
+            {
+                printf("uso: upload <arquivo>\n");
+                rc = 2;
+            }
+            else
+                rc = executar_comando(peer, host, porta, "upload", args[1], "", "", "");
+        }
+        else if (strcmp(args[0], "download") == 0)
+        {
+            if (argc_cmd < 2)
+            {
+                printf("uso: download <nome> [saida]\n");
+                rc = 2;
+            }
+            else
+                rc = executar_comando(peer, host, porta, "download", "", args[1],
+                                      argc_cmd > 2 ? args[2] : "", "");
+        }
+        else if (strcmp(args[0], "lookup") == 0)
+        {
+            uint8_t oid[NODE_ID_LEN];
+            if (argc_cmd < 2)
+            {
+                printf("uso: lookup <nome|object-id>\n");
+                rc = 2;
+            }
+            else if (ler_object_id(args[1], oid) == 0)
+                rc = executar_comando(peer, host, porta, "lookup", "", "", "", args[1]);
+            else
+                rc = executar_comando(peer, host, porta, "lookup", "", args[1], "", "");
+        }
+        else if (strcmp(args[0], "state") == 0 || strcmp(args[0], "topology") == 0 ||
+                 strcmp(args[0], "ping") == 0 || strcmp(args[0], "join") == 0 ||
+                 strcmp(args[0], "leave") == 0)
+        {
+            const char *cmd = strcmp(args[0], "state") == 0 ? "topology" : args[0];
+            if (argc_cmd >= 3)
+            {
+                sp_host = args[1];
+                sp_porta = atoi(args[2]);
+            }
+            if (sp_porta < 1 || sp_porta > 65535)
+            {
+                printf("Erro: porta invalida\n");
+                rc = 2;
+            }
+            else
+                rc = executar_comando(peer, sp_host, sp_porta, cmd, "", "", "", "");
+        }
+        else
+        {
+            printf("Erro: comando desconhecido: %s (help lista os comandos)\n", args[0]);
+            rc = 2;
+        }
+
+        printf("[done %d rc=%d]\n", numero, rc);
+        fflush(stdout);
+        if (rc != 0)
+        {
+            rc_final = rc;
+            if (para_no_erro)
+                break;
+        }
+    }
+
+    printf("[bye]\n");
+    fflush(stdout);
+    return rc_final;
+}
+
+int main(int argc, char *argv[])
+{
+    char host[256] = "127.0.0.1";
+    int porta = 55101;
+    char cmd[256] = "ping";
+
+    char file_param[256] = "";
+    char name_param[256] = "";
+    char output_param[256] = "";
+    char object_id_param[256] = "";
+
+    // identidade do proprio peer, com valores padrao
+    char ip_local[NODE_IP_LEN] = "127.0.0.1";
+    char porta_local[8] = "55102";
+    char arquivo_uuid[NODE_PATH_LEN] = "peer.uuid";
+    NodeConfig config;
+    Node peer;
+
+    // modo sessao: --interactive le a stdin, --batch le um arquivo ("-" = stdin)
+    int interativo = 0;
+    const char *arquivo_lote = NULL;
+    int continuar_no_erro = 0;
+
+    struct option long_options[] = {
+        {"cmd", required_argument, 0, 'c'},
+        {"host", required_argument, 0, 'h'},
+        {"port", required_argument, 0, 'p'},
+        {"ip", required_argument, 0, 'i'},
+        {"myport", required_argument, 0, 'm'},
+        {"uuid", required_argument, 0, 'u'},
+        {"file", required_argument, 0, 'f'},
+        {"name", required_argument, 0, 'n'},
+        {"output", required_argument, 0, 'o'},
+        {"object-id", required_argument, 0, 'x'},
+        {"interactive", no_argument, 0, 'I'},
+        {"batch", required_argument, 0, 'B'},
+        {"keep-going", no_argument, 0, 'K'},
+        {0, 0, 0, 0}};
+
+    // saida linha a linha: o harness acompanha o log enquanto a sessao roda
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
+    // leitura dos parametros de disparo (adaptado para ser o peer/cliente)
+    int opt;
+    while ((opt = getopt_long(argc, argv, "c:h:p:i:m:u:f:n:o:x:", long_options, NULL)) != -1)
+    {
+        switch (opt)
+        {
+        case 'c':
+            snprintf(cmd, sizeof(cmd), "%s", optarg);
+            break;
+        case 'h':
+            snprintf(host, sizeof(host), "%s", optarg);
+            break;
+        case 'p':
+            porta = atoi(optarg);
+            break;
+        case 'i':
+            snprintf(ip_local, sizeof(ip_local), "%s", optarg);
+            break;
+        case 'm':
+            snprintf(porta_local, sizeof(porta_local), "%s", optarg);
+            break;
+        case 'u':
+            snprintf(arquivo_uuid, sizeof(arquivo_uuid), "%s", optarg);
+            break;
+        case 'f':
+            snprintf(file_param, sizeof(file_param), "%s", optarg);
+            break;
+        case 'n':
+            snprintf(name_param, sizeof(name_param), "%s", optarg);
+            break;
+        case 'o':
+            snprintf(output_param, sizeof(output_param), "%s", optarg);
+            break;
+        case 'x':
+            snprintf(object_id_param, sizeof(object_id_param), "%s", optarg);
+            break;
+        case 'I':
+            interativo = 1;
+            break;
+        case 'B':
+            arquivo_lote = optarg;
+            break;
+        case 'K':
+            continuar_no_erro = 1;
+            break;
+        }
+    }
+
+    if (optind < argc)
+    {
+        if (strcmp(argv[optind], "upload") == 0 && optind + 1 < argc)
+        {
+            snprintf(cmd, sizeof(cmd), "upload");
+            snprintf(file_param, sizeof(file_param), "%s", argv[optind + 1]);
+        }
+        else if (strcmp(argv[optind], "download") == 0 && optind + 1 < argc)
+        {
+            snprintf(cmd, sizeof(cmd), "download");
+            snprintf(name_param, sizeof(name_param), "%s", argv[optind + 1]);
+        }
+        else if (strcmp(argv[optind], "join") == 0)
+        {
+            snprintf(cmd, sizeof(cmd), "join");
+        }
+        else if (strcmp(argv[optind], "leave") == 0)
+        {
+            snprintf(cmd, sizeof(cmd), "leave");
+        }
+        else if (strcmp(argv[optind], "ping") == 0)
+        {
+            snprintf(cmd, sizeof(cmd), "ping");
+        }
+    }
+
+    // Os comandos upload e download serao executados apos a conexao com o superpeer
+
+    // monta e valida a configuracao antes de gerar o NodeID
+    memset(&config, 0, sizeof(config));
+    config.role = ROLE_PEER;
+    if (node_parse_ip(ip_local, config.ip, sizeof(config.ip)) != 0)
+    {
+        fprintf(stderr, "Erro: IP invalido: %s\n", ip_local);
+        return 1;
+    }
+    if (node_parse_port(porta_local, &config.port) != 0)
+    {
+        fprintf(stderr, "Erro: porta invalida: %s\n", porta_local);
+        return 1;
+    }
+    if (porta < 1 || porta > 65535)
+    {
+        fprintf(stderr, "Erro: porta do superpeer invalida: %d\n", porta);
+        return 1;
+    }
+    if (node_parse_ip(host, config.superpeer_ip, sizeof(config.superpeer_ip)) != 0)
+    {
+        fprintf(stderr, "Erro: IP do superpeer invalido: %s\n", host);
+        return 1;
+    }
+    config.superpeer_port = (uint16_t)porta;
+    snprintf(config.uuid_path, sizeof(config.uuid_path), "%s", arquivo_uuid);
+
+    if (node_init(&peer, &config) != 0)
+    {
+        return 1;
+    }
+    // node_print removido para limpar o terminal
+
+    if (interativo || arquivo_lote != NULL)
+    {
+        FILE *entrada = stdin;
+        int rc;
+
+        if (arquivo_lote != NULL && strcmp(arquivo_lote, "-") != 0)
+        {
+            entrada = fopen(arquivo_lote, "r");
+            if (entrada == NULL)
+            {
+                fprintf(stderr, "Erro: nao foi possivel abrir %s\n", arquivo_lote);
+                return 1;
+            }
+        }
+        // a sessao interativa nunca para no erro; o lote para, salvo --keep-going
+        rc = executar_sessao(&peer, host, porta, entrada, !interativo && !continuar_no_erro);
+        if (entrada != stdin)
+            fclose(entrada);
+        return interativo ? 0 : rc;
+    }
+
+    return executar_comando(&peer, host, porta, cmd, file_param, name_param,
+                            output_param, object_id_param);
 }

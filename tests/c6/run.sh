@@ -113,7 +113,23 @@ else
     sleep $((FAILURE_TIMEOUT_SEC + 10))
     cat <(tail -n +"$inicio" "$LOG") <(tail -n +"$inicio2" "$LOG_SP2") > "$LOG_DIR/c6_bully.log"
     assert_contains "$LOG_DIR/c6_bully.log" "SUSPECT $COORD|detect failure: $COORD" "Bully: falha do coordenador $COORD detectada"
-    assert_contains "$LOG_DIR/c6_bully.log" 'ELECTION ->' "Bully: ELECTION enviada aos nos de maior prioridade"
+    # Dois caminhos validos, conforme quem detecta a falha primeiro:
+    #  a) um no menor detecta e manda ELECTION aos maiores (ELECTION ->);
+    #  b) o maior no vivo detecta e vence direto: bully_election manda ELECTION a todo
+    #     membro vivo maior, entao "start election" seguido de "highest NodeID wins" sem
+    #     ELECTION no meio so acontece quando nao ha no maior vivo.
+    if grep -q 'ELECTION ->' "$LOG_DIR/c6_bully.log"; then
+        ok "Bully: ELECTION enviada aos nos de maior prioridade"
+    elif awk -v c="detect failure: $COORD" '
+            index($0, c) == 1 { d = 1; next }
+            d && $0 == "start election" { s = 1; next }
+            s && /^ELECTION -> / { exit 1 }
+            s && /^highest NodeID wins: / { w = 1; exit }
+            END { exit !w }' "$LOG_DIR/c6_bully.log"; then
+        ok "Bully: maior no vivo detectou a falha e venceu sem ELECTION (nenhum no maior vivo)"
+    else
+        fail "Bully: nem ELECTION aos maiores nem vitoria direta do maior no vivo apos a falha de $COORD"
+    fi
     assert_contains "$LOG_DIR/c6_bully.log" 'highest NodeID wins' "Bully: eleicao concluida pelo maior NodeID"
     assert_contains "$LOG_DIR/c6_bully.log" 'COORDINATOR SP' "Bully: novo COORDINATOR anunciado"
 fi

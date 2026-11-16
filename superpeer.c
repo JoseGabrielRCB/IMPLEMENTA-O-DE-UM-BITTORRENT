@@ -1013,8 +1013,15 @@ static int ler_linha_csv(const char *linha, NodeConfig *config, const char *port
             return -1;
         }
     }
-    if (!tem_nome && strcmp(porta_csv, porta) == 0) {
-        snprintf(nome, tamanho_nome, "%s", nome_csv);
+    if (strcmp(porta_csv, porta) == 0) {
+        if (!tem_nome) {
+            snprintf(nome, tamanho_nome, "%s", nome_csv);
+        }
+        /* a linha deste no diz o IP que os outros usam para chegar nele */
+        if (node_parse_ip(ip, config->ip, sizeof(config->ip)) != 0) {
+            fprintf(stderr, "Erro: IP invalido na linha: %s\n", linha);
+            return -1;
+        }
     }
     return 0;
 }
@@ -1104,7 +1111,9 @@ static int ler_opcoes(int argc, char *argv[], NodeConfig *config, char *nome, si
         return -1;
     }
 
-    if (node_parse_ip(IP_PADRAO, config->ip, sizeof(config->ip)) != 0) {
+    /* sem linha do roster para esta porta, fica no endereco local */
+    if (config->ip[0] == '\0' &&
+        node_parse_ip(IP_PADRAO, config->ip, sizeof(config->ip)) != 0) {
         return -1;
     }
     if (node_parse_port(porta, &config->port) != 0) {
@@ -2590,14 +2599,40 @@ static void bully_tick(time_t *ultimo_anuncio)
     }
 }
 
+/* Na partida, a eleicao so e necessaria sem coordenador vivo ou se este no tem NodeID
+ * maior que o dele. Um no que volta e ja recebeu COORDINATOR (por exemplo, no IST)
+ * nao deve apagar o coordenador para eleger de novo: durante a eleicao ele recusaria
+ * STORE por estar sem coordenador. */
+static int bully_start_needs_election(BullySnapshot *copia)
+{
+    if (bully_snapshot(copia) != 0) {
+        return 1;
+    }
+    if (copia->state != BULLY_FOLLOWER || !copia->has_coord) {
+        return 1;
+    }
+    if (chord_same(&copia->coord, &bully_self)) {
+        return 0;
+    }
+    if (!bully_coord_alive(&copia->coord)) {
+        return 1;
+    }
+    return node_id_compare(bully_self.id, copia->coord.id) > 0;
+}
+
 /* Rotina periodica: espera a membership e confere a cada BULLY_PERIOD_SEC */
 static void *bully_loop(void *arg)
 {
     time_t ultimo_anuncio = time(NULL);
+    BullySnapshot copia;
 
     (void)arg;
     sleep(BULLY_START_SEC);
-    bully_election();
+    if (bully_start_needs_election(&copia)) {
+        bully_election();
+    } else {
+        printf("Bully: coordenador %s ja conhecido, sem eleicao de partida\n", copia.coord.name);
+    }
     for (;;) {
         sleep(BULLY_PERIOD_SEC);
         bully_tick(&ultimo_anuncio);
