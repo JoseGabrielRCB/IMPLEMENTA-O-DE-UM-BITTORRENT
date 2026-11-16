@@ -157,14 +157,16 @@ cmd_chord() {
 cmd_coordinator() {
     ins_names "$@" || return 1
     ins_load_ids
-    local name coord elections won agreed="" mixed=0 best="" n
-    printf '%-8s %-12s %-10s %s\n' NOME COORDENADOR ELEICOES 'VENCEU(vezes)'
+    local name coord elections won agreed="" mixed=0 best="" n proc
+    printf '%-8s %-6s %-12s %-10s %s\n' NOME PROC COORDENADOR ELEICOES 'VENCEU(vezes)'
     for name in "${INS_NAMES[@]}"; do
         coord="$(ins_last "$name" '^COORDINATOR ' 2)"
         elections="$(ins_cat "$name" 2>/dev/null | grep -c '^start election' || true)"
         won="$(ins_cat "$name" 2>/dev/null | grep -c '^highest NodeID wins: ' || true)"
-        printf '%-8s %-12s %-10s %s\n' "$name" "${coord:--}" "$elections" "$won"
-        [[ -n "$coord" ]] || continue
+        proc="$(ins_proc "$name")"
+        printf '%-8s %-6s %-12s %-10s %s\n' "$name" "${proc:-?}" "${coord:--}" "$elections" "$won"
+        # um nó fora do ar guarda só o que sabia ao cair: não entra na concordância
+        [[ -n "$coord" && "$proc" != dead ]] || continue
         [[ -z "$agreed" ]] && agreed="$coord"
         [[ "$agreed" == "$coord" ]] || mixed=1
     done
@@ -177,9 +179,9 @@ cmd_coordinator() {
     if [[ -z "$agreed" ]]; then
         echo "nenhum coordenador anunciado ainda"
     elif ((mixed)); then
-        echo "DIVERGÊNCIA: os Super Peers não concordam sobre o coordenador"
+        echo "DIVERGÊNCIA: os Super Peers vivos não concordam sobre o coordenador"
     else
-        echo "todos reconhecem $agreed (maior NodeID entre os vivos: ${best:-?})"
+        echo "todos os vivos reconhecem $agreed (maior NodeID entre os vivos: ${best:-?})"
     fi
 }
 

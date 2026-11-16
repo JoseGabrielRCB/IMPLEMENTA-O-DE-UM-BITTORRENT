@@ -159,6 +159,29 @@ de um comando (`--cmd upload --file ...`) continua igual e sai com o mesmo códi
 Cada cliente roda dentro de `run/<nome>/` na máquina dele, então os arquivos de teste
 ficam em `../files/` (por exemplo `upload ../files/documento_a.pdf`).
 
+## Interface gráfica (`gui/`)
+
+```bash
+./gui/run.sh            # usa o mesmo cluster.conf (ou CLUSTER_CONF)
+```
+
+Janela em tkinter com gráficos do matplotlib. Na primeira execução cria `gui/.venv`
+e instala o matplotlib (precisa de internet). Precisa de `python3-tk`, `python3-venv`
+e `python3-pip` (`sudo apt install`) e de tela gráfica (no WSL, o WSLg; por ssh,
+`ssh -X`). Só a máquina do operador precisa disso.
+
+| Aba | O que faz |
+| --- | --- |
+| Cliente | Escolhe um cliente (C1…) e faz upload (arquivos de `out/files`), download, lookup, `state`, ping/join/leave ou um comando livre (`client do`) |
+| Cluster | Preparo (list, check, net, deploy, fixtures), subir/derrubar, status, abrir e fechar clientes, `kill -9`/stop/start/restart de um Super Peer |
+| Métricas | Anel Chord pelo NodeID com a seta do sucessor, matriz de membership, LogIndex por Super Peer, hits e misses do LFU e linha do tempo (vidas de cada processo, SUSPECT/FAILED, vitórias na eleição, IST). Atualiza sozinha; embaixo, a inspeção em texto do `cluster.sh` |
+| Cenários | Roda `scenarios/*.sh` (com `CLUSTER_KEEP` e `WAVE`) e mostra `out/relatorio.md` |
+| Logs | Acompanha o log espelhado de um processo, com filtro por categoria ou regex, e marca a troca de vida |
+
+A interface não tem lógica de teste própria: os botões chamam o `cluster.sh`/`run.sh`
+e os gráficos leem os logs em `logs/`. "Consultar processos vivos (ssh)" faz um
+`cluster.sh status` a cada atualização; desligado, os gráficos usam só os logs.
+
 ## Console
 
 ```text
