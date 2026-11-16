@@ -36,6 +36,7 @@ const char *nome_do_tipo(uint16_t tipo) {
         case MSG_STATE_TRANSFER: return "STATE_TRANSFER";
         case MSG_VOTE_YES: return "YES";
         case MSG_VOTE_NO: return "NO";
+        case MSG_CHUNK_STORE: return "CHUNK_STORE";
         default: return "UNKNOWN";
     }
 }

@@ -9,7 +9,9 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <pthread.h>
+#include <sys/stat.h>
 #include <openssl/sha.h>
+#include <lz4.h>
 
 #include "include/node.h"
 #include "include/network.h"
@@ -323,10 +325,6 @@ static int validar_origem(const Mensagem *msg, const char *tipo)
         printf("%s recusado: NodeID zerado\n", tipo);
         return -1;
     }
-    /* Se o peer ainda nao fez JOIN, auto-registra na tabela local de membros */
-    if (!member_table_contains(msg->header.no_origem)) {
-        member_table_add(msg->header.no_origem, IP_PADRAO, 55102);
-    }
     return 0;
 }
 
@@ -435,19 +433,18 @@ static void adicionar_provedor_unico(ProviderInfo p_infos[MAX_PROVIDERS], uint32
     (*count)++;
 }
 
-/* Responde o LOOKUP com o metadado seguido de count + ProviderInfo de cada provedor */
+/* Responde o LOOKUP com o metadado seguido de count + ProviderInfo de cada provedor.
+ * Provedores sao os Super Peers vivos, que recebem a replica dos chunks no upload
+ * (CHUNK_STORE). Um provedor sem o chunk responde ERROR e o cliente troca de replica. */
 static void tratar_lookup_responder(const Conexao *conexao, const Mensagem *msg, const char *nome,
-                                    const FileMetadata *meta, const uint8_t *payload,
-                                    uint32_t tamanho_payload)
+                                    const uint8_t *payload, uint32_t tamanho_payload)
 {
-    uint8_t providers[MAX_PROVIDERS][32];
     ProviderInfo p_infos[MAX_PROVIDERS];
     ChordNode vivos[MAX_PROVIDERS];
     uint32_t real_p_count = 0;
     uint32_t final_payload_size;
     uint8_t *final_payload;
     int n_vivos = 0;
-    int p_count = 0;
     int i;
 
     adicionar_provedor_unico(p_infos, &real_p_count,
@@ -456,16 +453,6 @@ static void tratar_lookup_responder(const Conexao *conexao, const Mensagem *msg,
     n_vivos = gossip_alive_members(vivos, MAX_PROVIDERS);
     for (i = 0; i < n_vivos; i++) {
         adicionar_provedor_unico(p_infos, &real_p_count, vivos[i].ip, vivos[i].port);
-    }
-
-    if (metadata_get_providers(meta->object_id, providers, &p_count) != METADATA_OK) {
-        p_count = 0;
-    }
-    for (i = 0; i < p_count && i < MAX_PROVIDERS; i++) {
-        ProviderInfo info;
-        if (member_table_get_provider_info(providers[i], &info) == MEMBER_OK) {
-            adicionar_provedor_unico(p_infos, &real_p_count, info.ip, info.port);
-        }
     }
 
     final_payload_size = tamanho_payload + (uint32_t)sizeof(uint32_t) +
@@ -524,7 +511,7 @@ static void tratar_lookup(const Conexao *conexao, const Mensagem *msg)
         return;
     }
 
-    tratar_lookup_responder(conexao, msg, nome, &meta, payload, tamanho_payload);
+    tratar_lookup_responder(conexao, msg, nome, payload, tamanho_payload);
     free(payload);
     metadata_free(&meta);
 }
@@ -736,7 +723,8 @@ static void tratar_download_req(const Conexao *conexao, const Mensagem *msg)
         sprintf(&hash_hex[j * 2], "%02x", chunk_hash[j]);
     }
     hash_hex[64] = '\0';
-    snprintf(caminho, sizeof(caminho), "storage/%s.lz4", hash_hex);
+    snprintf(caminho, sizeof(caminho), "storage/%u/%s.lz4",
+             (unsigned)conexao->superpeer->port, hash_hex);
 
     fc = fopen(caminho, "rb");
     if (fc == NULL) {
@@ -770,6 +758,134 @@ static void tratar_download_req(const Conexao *conexao, const Mensagem *msg)
     responder_com_payload(conexao, MSG_DOWNLOAD_REP, msg->header.no_origem,
                           resposta_buf, (uint32_t)comp_size);
     free(resposta_buf);
+}
+
+/* Envia um CHUNK_STORE (replica) a outro Super Peer; devolve 0 se ele respondeu ACK */
+static int replicar_chunk(const ChordNode *destino, const Mensagem *original)
+{
+    Mensagem pedido = *original;
+    Mensagem resposta;
+    int ok = -1;
+    int fd;
+
+    pedido.payload = (uint8_t *)malloc(original->header.tamanho_payload);
+    if (pedido.payload == NULL) {
+        return -1;
+    }
+    memcpy(pedido.payload, original->payload, original->header.tamanho_payload);
+    pedido.payload[METADATA_HASH_LEN] = 0; /* replica nao e repassada de novo */
+    memset(&resposta, 0, sizeof(resposta));
+
+    fd = conectar_no_servidor(destino->ip, destino->port);
+    if (fd >= 0) {
+        if (enviar_mensagem(fd, &pedido) == 0 && receber_mensagem(fd, &resposta) == 0 &&
+            resposta.header.tipo_mensagem == MSG_ACK) {
+            ok = 0;
+        }
+        liberar_mensagem(&resposta);
+        close(fd);
+    }
+    free(pedido.payload);
+    return ok;
+}
+
+/* Trata CHUNK_STORE: payload = SHA-256 do chunk original (32) + flag de repasse (1)
+ * + chunk comprimido. Valida (LZ4 decode -> SHA-256), grava em storage/<porta>/
+ * e, se veio do cliente, replica para os outros Super Peers vivos. */
+static void tratar_chunk_store(const Conexao *conexao, const Mensagem *msg)
+{
+    const uint32_t cabecalho = METADATA_HASH_LEN + 1;
+    uint32_t tamanho = msg->header.tamanho_payload;
+    const uint8_t *hash;
+    const uint8_t *dados;
+    uint32_t comp_size;
+    uint8_t *buffer;
+    uint8_t calc[METADATA_HASH_LEN];
+    char hash_hex[65];
+    char caminho[128];
+    ChordNode vivos[MAX_PROVIDERS];
+    int decomp;
+    int repassar;
+    int n_vivos;
+    int replicas = 0;
+    int i;
+    FILE *fc;
+
+    if (msg->header.versao_protocolo != VERSAO_PROTOCOLO || msg->payload == NULL ||
+        tamanho <= cabecalho) {
+        printf("CHUNK_STORE recusado: payload invalido\n");
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    hash = msg->payload;
+    repassar = msg->payload[METADATA_HASH_LEN] != 0;
+    dados = msg->payload + cabecalho;
+    comp_size = tamanho - cabecalho;
+
+    /* Compressed Chunk -> LZ4 Decode -> SHA-256 -> Validacao (Secao 10.4) */
+    buffer = (uint8_t *)malloc(CHUNK_SIZE);
+    if (buffer == NULL) {
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    decomp = LZ4_decompress_safe((const char *)dados, (char *)buffer, (int)comp_size, CHUNK_SIZE);
+    if (decomp <= 0) {
+        free(buffer);
+        printf("CHUNK_STORE recusado: LZ4 invalido\n");
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    SHA256(buffer, (size_t)decomp, calc);
+    free(buffer);
+    if (memcmp(calc, hash, METADATA_HASH_LEN) != 0) {
+        printf("CHUNK_STORE recusado: SHA-256 do chunk nao confere\n");
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+
+    for (i = 0; i < METADATA_HASH_LEN; i++) {
+        sprintf(&hash_hex[i * 2], "%02x", hash[i]);
+    }
+    hash_hex[64] = '\0';
+    mkdir("storage", 0755);
+    snprintf(caminho, sizeof(caminho), "storage/%u", (unsigned)conexao->superpeer->port);
+    mkdir(caminho, 0755);
+    snprintf(caminho, sizeof(caminho), "storage/%u/%s.lz4",
+             (unsigned)conexao->superpeer->port, hash_hex);
+
+    fc = fopen(caminho, "wb");
+    if (fc == NULL || fwrite(dados, 1, comp_size, fc) != comp_size) {
+        if (fc != NULL) {
+            fclose(fc);
+        }
+        printf("CHUNK_STORE: nao foi possivel gravar %s\n", caminho);
+        responder(conexao, MSG_ERROR, msg->header.no_origem);
+        return;
+    }
+    fclose(fc);
+    printf("CHUNK_STORE: chunk %.16s... armazenado em %s (%u bytes comprimidos)\n",
+           hash_hex, caminho, comp_size);
+
+    if (repassar) {
+        n_vivos = gossip_alive_members(vivos, MAX_PROVIDERS);
+        for (i = 0; i < n_vivos; i++) {
+            if (vivos[i].port == conexao->superpeer->port &&
+                strcmp(vivos[i].ip, conexao->superpeer->ip) == 0) {
+                continue;
+            }
+            if (replicar_chunk(&vivos[i], msg) == 0) {
+                replicas++;
+                printf("CHUNK_STORE: replica do chunk %.16s... enviada para %s\n",
+                       hash_hex, vivos[i].name);
+            } else {
+                printf("CHUNK_STORE: falha ao replicar chunk %.16s... para %s\n",
+                       hash_hex, vivos[i].name);
+            }
+        }
+        printf("CHUNK_STORE: chunk %.16s... com %d copias (local + %d replicas)\n",
+               hash_hex, replicas + 1, replicas);
+    }
+    responder(conexao, MSG_ACK, msg->header.no_origem);
 }
 
 /* Atende uma conexao aceita e encerra o socket */
@@ -830,6 +946,9 @@ static void *atender_conexao(void *arg)
             break;
         case MSG_DOWNLOAD_REQ:
             tratar_download_req(&conexao, &msg);
+            break;
+        case MSG_CHUNK_STORE:
+            tratar_chunk_store(&conexao, &msg);
             break;
         default:
             printf("Tipo de mensagem nao suportado\n");
@@ -2168,6 +2287,11 @@ int gossip_start(const Node *no, const char *nome, const char *bootstrap_ip,
     snprintf(gossip_self.ip, sizeof(gossip_self.ip), "%s", no->ip);
     gossip_self.port = no->port;
     snprintf(gossip_self.name, sizeof(gossip_self.name), "%s", nome);
+
+    /* O contador de heartbeat comeca no horario de inicio (numero de encarnacao):
+     * um no reiniciado envia heartbeats maiores que os da execucao anterior e os
+     * outros o reconhecem como ALIVE no primeiro heartbeat (Secoes 7.5 e 15.7). */
+    gossip_heartbeat = (uint64_t)time(NULL);
 
     inicio = (GossipStart *)malloc(sizeof(GossipStart));
     if (inicio == NULL) {

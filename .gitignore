@@ -11,4 +11,4 @@ build/
 
 # gerados ao rodar o peer (upload e download)
 downloaded_*
-storage/*.lz4
+storage/

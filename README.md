@@ -58,7 +58,7 @@
 
 # CHECKPOINT 6 — Integração e Teste Final (Aluno 1 + Aluno 2)
 
-### Executar bateria completa de integração final (12 verificações):
+### Executar bateria completa de integração final (29 verificações, com derrubada de nós, IST, Bully e 2PC com falha):
     bash tests/c6/run.sh
 
 ### Upload, Lookup com Cache LFU e Download Paralelo Multi-Réplica:
@@ -66,3 +66,7 @@
     ./bin/peer --cmd lookup --name documento_c.pdf --host 127.0.0.1 --port 5102
     ./bin/peer --cmd download --name documento_c.pdf --output /tmp/saida.pdf --host 127.0.0.1 --port 5103
 
+### Documentação do checkpoint:
+    docs/cp6/CP6_Integracao_e_Teste_Final.md
+
+### Cada Super Peer guarda as suas réplicas dos chunks em storage/<porta>/

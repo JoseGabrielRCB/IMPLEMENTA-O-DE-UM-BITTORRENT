@@ -140,5 +140,24 @@ O superpeer usa todos (superpeer, node, protocol, network, metadata, chord, goss
 ### 14. cache.c e peer.c (Cache LFU e Download Paralelo Multi-Réplica - checkpoints 5 e 6)
 
 * **Cache LFU (`cache.c`)** : cache em RAM com capacidade `CACHE_CAPACITY = 8`, protegida por mutex, contadores `frequency` (LFU) e `last_access` (desempate LRU), além de `cache_invalidate()` em atualizações de arquivo.
-* **Transferência Paralela e Failover de Réplicas (`peer.c`)** : dispara 1 thread (`pthread_create`) por chunk de 4 MiB, distribui as requisições `MSG_DOWNLOAD_REQ` em Round-Robin entre as réplicas retornadas pelo `LOOKUP` (`(chunk_index + attempt) % provider_count`), faz failover automático caso uma réplica falhe, verifica o SHA-256 do chunk, descomprime com LZ4 e valida o SHA-256 global do arquivo reconstruído.
+* **Transferência Paralela e Failover de Réplicas (`peer.c`)** : dispara 1 thread (`pthread_create`) por chunk de 4 MiB, distribui as requisições `MSG_DOWNLOAD_REQ` em Round-Robin entre as réplicas retornadas pelo `LOOKUP` (`(chunk_index + attempt) % provider_count`), faz failover automático caso uma réplica falhe, descomprime com LZ4, verifica o SHA-256 do chunk (calculado sobre o conteúdo original, Seção 10.4) e valida o SHA-256 global do arquivo reconstruído.
+
+### 15. Consolidação nos 5 arquivos principais (checkpoint 6)
+
+No checkpoint 6 os módulos separados foram incorporados aos 5 arquivos do Checkpoint 1. Os `.h` da pasta `include/` continuam valendo como interface de cada camada. As seções 5, 7, 8, 12, 13 e 14 acima descrevem a lógica; o código está hoje em:
+
+| Módulo original | Onde está agora |
+|---|---|
+| `metadata.c` (hash table, índice por nome, provedores) | `node.c` |
+| `chord.c` (anel, finger table, lookup) | `superpeer.c`, seção "CAMADA CHORD DHT" |
+| `gossip.c` (membership, heartbeat, SUSPECT/FAILED/REMOVED) | `superpeer.c`, camada Gossip |
+| `bully.c` (ELECTION/OK/COORDINATOR) | `superpeer.c`, camada Bully |
+| `smr.c` (log SMR, 2PC, IST) | `superpeer.c`, camada SMR |
+| `cache.c` (LFU) | `superpeer.c`, camada Cache |
+
+### 16. Réplica real dos chunks (checkpoint 6)
+
+* **CHUNK_STORE (tipo 29)** : depois que o STORE é confirmado pelo 2PC, o peer envia cada chunk comprimido ao Super Peer de entrada. Esse Super Peer valida (LZ4 decode → SHA-256), grava em `storage/<porta>/<sha256>.lz4` e replica para os demais Super Peers vivos. Assim cada réplica guarda os seus próprios dados, e o download funciona com os nós em diretórios ou máquinas diferentes.
+* **DOWNLOAD_REQ** : cada Super Peer serve apenas o que está no seu `storage/<porta>/`. Se uma réplica não responder, o cliente seleciona a próxima (Seção 11.6).
+* **Heartbeat com número de encarnação** : o contador de heartbeat do Gossip começa no horário de início do processo. Assim, um Super Peer reiniciado é reconhecido como ALIVE no primeiro heartbeat, e não fica "morto" para os outros até o contador alcançar o valor da execução anterior.
 

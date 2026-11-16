@@ -89,8 +89,9 @@ int processar_upload(const char *caminho, FileMetadata *meta)
         size_t lido = fread(buffer, 1, CHUNK_SIZE, f);
         int comp_size = LZ4_compress_default((const char *)buffer, (char *)compressed, lido, max_compressed);
 
+        /* SHA-256 do chunk sobre o conteudo original, antes do LZ4 (Secoes 10.4 e 11.3) */
         uint8_t chunk_hash[32];
-        SHA256(compressed, comp_size, chunk_hash);
+        SHA256(buffer, lido, chunk_hash);
         memcpy(meta->chunk_hashes[i], chunk_hash, 32);
 
         char chunk_path[128];
@@ -256,21 +257,21 @@ static void *baixar_chunk_thread(void *arg)
         return NULL;
     }
 
-    SHA256(compressed, (size_t)comp_size, calc_hash);
-    if (memcmp(calc_hash, t->chunk_hash, 32) != 0)
-    {
-        printf("Chunk %u/%u: falha no checksum SHA-256\n", t->chunk_index + 1, t->chunk_count);
-        free(compressed);
-        free(buffer);
-        t->status = -1;
-        return NULL;
-    }
-
+    /* Compressed Chunk -> LZ4 Decode -> SHA-256 -> Validacao (Secao 10.4) */
     int decomp_size = LZ4_decompress_safe((const char *)compressed, (char *)buffer, comp_size, CHUNK_SIZE);
     free(compressed);
 
     if (decomp_size <= 0)
     {
+        free(buffer);
+        t->status = -1;
+        return NULL;
+    }
+
+    SHA256(buffer, (size_t)decomp_size, calc_hash);
+    if (memcmp(calc_hash, t->chunk_hash, 32) != 0)
+    {
+        printf("Chunk %u/%u: falha no checksum SHA-256\n", t->chunk_index + 1, t->chunk_count);
         free(buffer);
         t->status = -1;
         return NULL;
@@ -344,6 +345,80 @@ void processar_download_paralelo(FileMetadata *meta, const char *output_path,
     {
         printf("Erro: SHA-256 global do arquivo reconstituido diverge do ObjectID\n");
     }
+}
+
+/* Depois do STORE confirmado, envia cada chunk comprimido ao Super Peer (CHUNK_STORE),
+ * que valida, grava e replica para os demais Super Peers vivos */
+static int enviar_chunks(const FileMetadata *meta, const char *host, int port,
+                         const uint8_t self_id[NODE_ID_LEN])
+{
+    int max_comp = LZ4_compressBound(CHUNK_SIZE);
+    uint8_t *payload = (uint8_t *)malloc((size_t)max_comp + 33);
+    int falhas = 0;
+
+    if (payload == NULL)
+        return -1;
+
+    for (uint32_t i = 0; i < meta->chunk_count; i++)
+    {
+        char hash_hex[65];
+        char chunk_path[128];
+        long fsize = 0;
+        FILE *fc;
+        Mensagem pedido;
+        Mensagem resposta;
+        int ok = 0;
+
+        for (int j = 0; j < 32; j++)
+            sprintf(&hash_hex[j * 2], "%02x", meta->chunk_hashes[i][j]);
+        snprintf(chunk_path, sizeof(chunk_path), "storage/%s.lz4", hash_hex);
+
+        fc = fopen(chunk_path, "rb");
+        if (fc != NULL)
+        {
+            fseek(fc, 0, SEEK_END);
+            fsize = ftell(fc);
+            fseek(fc, 0, SEEK_SET);
+            if (fsize <= 0 || fsize > max_comp ||
+                fread(payload + 33, 1, (size_t)fsize, fc) != (size_t)fsize)
+                fsize = 0;
+            fclose(fc);
+        }
+        if (fsize > 0)
+        {
+            memcpy(payload, meta->chunk_hashes[i], 32);
+            payload[32] = 1; /* Super Peer de entrada replica para os demais */
+
+            memset(&pedido, 0, sizeof(pedido));
+            memset(&resposta, 0, sizeof(resposta));
+            pedido.header.versao_protocolo = VERSAO_PROTOCOLO;
+            pedido.header.tipo_mensagem = MSG_CHUNK_STORE;
+            memcpy(pedido.header.no_origem, self_id, NODE_ID_LEN);
+            pedido.header.tamanho_payload = (uint32_t)fsize + 33;
+            pedido.payload = payload;
+
+            int fd = conectar_no_servidor(host, port);
+            if (fd >= 0)
+            {
+                if (enviar_mensagem(fd, &pedido) == 0 && receber_mensagem(fd, &resposta) == 0 &&
+                    resposta.header.tipo_mensagem == MSG_ACK)
+                    ok = 1;
+                liberar_mensagem(&resposta);
+                close(fd);
+            }
+        }
+        if (ok)
+            printf("Chunk %u/%u enviado ao Super Peer %s:%d e replicado\n",
+                   i + 1, meta->chunk_count, host, port);
+        else
+        {
+            printf("Chunk %u/%u: falha ao enviar ao Super Peer %s:%d\n",
+                   i + 1, meta->chunk_count, host, port);
+            falhas++;
+        }
+    }
+    free(payload);
+    return falhas == 0 ? 0 : -1;
 }
 
 // separa o metadado da lista de provedores (count + ProviderInfo) no fim da resposta do LOOKUP
@@ -659,6 +734,19 @@ int main(int argc, char *argv[])
                      resposta.header.tipo_mensagem != MSG_ACK)
             {
                 printf("Erro: super peer respondeu %s\n", nome_do_tipo(resposta.header.tipo_mensagem));
+            }
+            else if (msg.header.tipo_mensagem == MSG_STORE && resposta.header.tipo_mensagem == MSG_ACK)
+            {
+                FileMetadata enviado;
+                if (metadata_deserialize(msg.payload, msg.header.tamanho_payload, &enviado) == METADATA_OK)
+                {
+                    enviar_chunks(&enviado, host, porta, peer.node_id);
+                    metadata_free(&enviado);
+                }
+            }
+            else if (msg.header.tipo_mensagem == MSG_STORE)
+            {
+                printf("Erro: super peer respondeu %s ao STORE\n", nome_do_tipo(resposta.header.tipo_mensagem));
             }
             else if (msg.header.tipo_mensagem == MSG_JOIN && resposta.header.tipo_mensagem == MSG_ACK)
             {

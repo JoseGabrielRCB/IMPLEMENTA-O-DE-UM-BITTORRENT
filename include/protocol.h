@@ -36,7 +36,8 @@ typedef enum {
     MSG_TOPOLOGY = 25,
     MSG_LOG_APPEND = 26,
     MSG_VOTE_YES = 27,
-    MSG_VOTE_NO = 28
+    MSG_VOTE_NO = 28,
+    MSG_CHUNK_STORE = 29
 } TipoMensagem;
 
 /* IP e porta de um peer provedor, anexados na resposta do LOOKUP */
