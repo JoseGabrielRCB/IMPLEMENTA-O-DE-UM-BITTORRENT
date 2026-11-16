@@ -1,0 +1,6 @@
+# gerados pelo harness
+logs/
+out/
+# tem IPs e usuários da equipe
+cluster.conf
+cluster.conf.bak
