@@ -504,6 +504,8 @@ static void tratar_lookup(const Conexao *conexao, const Mensagem *msg)
         }
         cache_put(&meta);
     }
+    /* estatistica local deste Super Peer (RF-024): ultimo acesso e contador */
+    metadata_table_touch(meta.object_id, &meta.last_access, &meta.download_counter);
     if (metadata_serialize(&meta, &payload, &tamanho_payload) != METADATA_OK) {
         printf("LOOKUP: nao foi possivel serializar o metadado\n");
         metadata_free(&meta);
@@ -2828,7 +2830,7 @@ static void smr_print_hex(const uint8_t *bytes, size_t tamanho)
 static void smr_print(const SmrLogEntry *e, const char *filename)
 {
     printf("LOG #%llu\n", (unsigned long long)e->log_index);
-    printf("PUT %s\n", filename);
+    printf("%s %s\n", e->operation == SMR_OP_DELETE ? "DELETE" : "PUT", filename);
     printf("TransactionID: ");
     smr_print_hex(e->transaction_id, sizeof(e->transaction_id));
     printf("  Version: %llu  Checksum: ", (unsigned long long)e->version);
@@ -2983,7 +2985,7 @@ static int smr_apply_locked(const SmrLogEntry *e, const FileMetadata *meta,
     }
     metadata_add_provider(meta->object_id, provider);
     cache_invalidate(meta->object_id);
-    if (populate_cache) {
+    if (populate_cache && e->operation != SMR_OP_DELETE) {
         cache_put(meta);
     }
 
@@ -3061,9 +3063,11 @@ uint64_t smr_last_applied(void)
 }
 
 /* Coordenador: executa Two-Phase Commit (PREPARE -> YES/NO -> COMMIT/ABORT) e aplica em ordem total */
-int smr_put(const FileMetadata *meta, const uint8_t provider[NODE_ID_LEN])
+int smr_put(const FileMetadata *meta_in, const uint8_t provider[NODE_ID_LEN])
 {
     ChordNode membros[SMR_MEMBERS_MAX];
+    FileMetadata copia;
+    const FileMetadata *meta = &copia;
     SmrLogEntry e;
     uint8_t *meta_buf = NULL;
     uint32_t meta_len = 0;
@@ -3076,19 +3080,35 @@ int smr_put(const FileMetadata *meta, const uint8_t provider[NODE_ID_LEN])
     int resultado = -1;
     int i;
 
-    if (meta == NULL || provider == NULL) {
+    if (meta_in == NULL || provider == NULL) {
         return -1;
     }
     if (pthread_mutex_lock(&smr_order_mutex) != 0) {
         return -1;
     }
+    if (metadata_copy(&copia, meta_in) != METADATA_OK) {
+        pthread_mutex_unlock(&smr_order_mutex);
+        return -1;
+    }
+
+    /* ReplicaPeers (Secao 8.3): os Super Peers que vao aplicar a entrada, isto e,
+     * este coordenador e os participantes ALIVE do 2PC */
+    total = gossip_alive_members(membros, SMR_MEMBERS_MAX);
+    copia.replica_count = 0;
+    memcpy(copia.replica_peers[copia.replica_count++], smr_self_id, NODE_ID_LEN);
+    for (i = 0; i < total && copia.replica_count < METADATA_REPLICA_MAX; i++) {
+        memcpy(copia.replica_peers[copia.replica_count++], membros[i].id, NODE_ID_LEN);
+    }
+
     if (metadata_serialize(meta, &meta_buf, &meta_len) != METADATA_OK) {
+        metadata_free(&copia);
         pthread_mutex_unlock(&smr_order_mutex);
         return -1;
     }
 
     if (pthread_mutex_lock(&smr_mutex) != 0) {
         free(meta_buf);
+        metadata_free(&copia);
         pthread_mutex_unlock(&smr_order_mutex);
         return -1;
     }
@@ -3096,25 +3116,27 @@ int smr_put(const FileMetadata *meta, const uint8_t provider[NODE_ID_LEN])
     e.log_index = smr_applied + 1;
     e.timestamp = ++smr_clock;
     smr_make_txid(e.transaction_id, ++smr_seq);
-    e.operation = SMR_OP_PUT;
+    e.operation = (copia.status == METADATA_STATUS_REMOVED) ? SMR_OP_DELETE : SMR_OP_PUT;
     memcpy(e.object_id, meta->object_id, 32);
     e.version = meta->version;
     pthread_mutex_unlock(&smr_mutex);
 
     if (smr_checksum(&e, meta_buf, meta_len, provider, e.checksum) != 0) {
         free(meta_buf);
+        metadata_free(&copia);
         pthread_mutex_unlock(&smr_order_mutex);
         return -1;
     }
     payload = smr_write_payload(&e, meta_buf, meta_len, provider, &tamanho);
     if (payload == NULL) {
         free(meta_buf);
+        metadata_free(&copia);
         pthread_mutex_unlock(&smr_order_mutex);
         return -1;
     }
 
-    /* Fase 1 do 2PC: PREPARE(TransactionID) para todos os participantes ALIVE */
-    total = gossip_alive_members(membros, SMR_MEMBERS_MAX);
+    /* Fase 1 do 2PC: PREPARE(TransactionID) para todos os participantes ALIVE
+     * (os mesmos que foram para ReplicaPeers) */
     printf("2PC [IDLE -> PREPARING] LOG #%llu TransactionID=", (unsigned long long)e.log_index);
     smr_print_hex(e.transaction_id, 16);
     printf(" (%d participantes)\n", total);
@@ -3164,6 +3186,7 @@ int smr_put(const FileMetadata *meta, const uint8_t provider[NODE_ID_LEN])
 
     free(payload);
     free(meta_buf);
+    metadata_free(&copia);
     pthread_mutex_unlock(&smr_order_mutex);
     return resultado;
 }
@@ -3200,7 +3223,7 @@ static int smr_validate_entry(const uint8_t origem[NODE_ID_LEN], const uint8_t *
         return -1;
     }
     if (smr_read_payload(payload, tamanho, e, &meta_buf, &meta_len, provider) != 0 ||
-        e->operation != SMR_OP_PUT) {
+        (e->operation != SMR_OP_PUT && e->operation != SMR_OP_DELETE)) {
         printf("SMR recusado: payload invalido\n");
         return -1;
     }
@@ -3215,6 +3238,11 @@ static int smr_validate_entry(const uint8_t origem[NODE_ID_LEN], const uint8_t *
     }
     if (memcmp(meta->object_id, e->object_id, 32) != 0) {
         printf("SMR recusado: ObjectID diferente do metadado\n");
+        metadata_free(meta);
+        return -1;
+    }
+    if ((e->operation == SMR_OP_DELETE) != (meta->status == METADATA_STATUS_REMOVED)) {
+        printf("SMR recusado: operacao nao confere com o Status do metadado\n");
         metadata_free(meta);
         return -1;
     }

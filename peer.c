@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <time.h>
 
 #include <lz4.h>
 #include <openssl/sha.h>
@@ -77,6 +78,9 @@ int processar_upload(const char *caminho, FileMetadata *meta)
     memcpy(meta->object_id, object_id, 32);
     snprintf(meta->filename, sizeof(meta->filename), "%s", caminho);
     meta->size = size;
+    meta->compression = METADATA_COMPRESSION_LZ4;
+    meta->upload_date = (uint64_t)time(NULL);
+    meta->status = METADATA_STATUS_ACTIVE;
 
     uint8_t *buffer = malloc(CHUNK_SIZE);
     int max_compressed = LZ4_compressBound(CHUNK_SIZE);
@@ -443,6 +447,11 @@ int separar_provedores(const uint8_t *payload, uint32_t tamanho, uint32_t *taman
         return -1;
     memcpy(&chunk_count, payload + pos, sizeof(uint32_t));
     pos += sizeof(uint32_t) + (uint64_t)chunk_count * METADATA_HASH_LEN + sizeof(uint64_t) + METADATA_ID_LEN;
+    /* compression | upload_date | last_access | download_counter | status | replica_count */
+    pos += METADATA_EXTRA_LEN;
+    if (pos > tamanho)
+        return -1;
+    pos += (uint64_t)payload[pos - 1] * METADATA_ID_LEN;
     if (pos + sizeof(uint32_t) > tamanho)
         return -1;
     memcpy(&provedores, payload + pos, sizeof(uint32_t));
@@ -668,6 +677,7 @@ static int executar_comando(Node *peer, const char *host, int porta, const char 
                     else
                     {
                         metadata_print(&meta);
+                        metadata_print_details(&meta);
                         rc = 0;
                     }
                     metadata_free(&meta);
@@ -702,6 +712,102 @@ static int executar_comando(Node *peer, const char *host, int porta, const char 
 
     liberar_mensagem(&msg);
     close(socket_fd);
+    return rc;
+}
+
+/* Remocao logica (Secao 8.4): busca o metadado pelo nome, marca Status = REMOVED e
+ * envia um STORE. O coordenador registra DELETE no log via 2PC (Secao 12.3), e cada
+ * Super Peer marca o registro como REMOVED, com Version++. */
+static int executar_delete(Node *peer, const char *host, int porta, const char *nome)
+{
+    Mensagem msg;
+    Mensagem resposta;
+    FileMetadata meta;
+    ProviderInfo providers[MAX_PROVIDERS];
+    uint32_t tamanho_meta = 0;
+    uint32_t n_providers = 0;
+    uint8_t *payload = NULL;
+    uint32_t tam = 0;
+    int achou = 0;
+    int rc = 1;
+    int fd;
+
+    if (nome == NULL || nome[0] == '\0')
+    {
+        printf("uso: delete <nome>\n");
+        return 2;
+    }
+
+    /* 1) LOOKUP: o metadado atual do arquivo */
+    fd = conectar_no_servidor(host, porta);
+    if (fd < 0)
+    {
+        printf("Erro: nao foi possivel conectar ao Super Peer %s:%d\n", host, porta);
+        return 1;
+    }
+    memset(&msg, 0, sizeof(msg));
+    memset(&resposta, 0, sizeof(resposta));
+    msg.header.versao_protocolo = 1;
+    msg.header.tipo_mensagem = MSG_LOOKUP;
+    memcpy(msg.header.no_origem, peer->node_id, NODE_ID_LEN);
+    msg.header.tamanho_payload = (uint32_t)strlen(nome);
+    msg.payload = (uint8_t *)strdup(nome);
+    if (msg.payload != NULL && enviar_mensagem(fd, &msg) == 0 && receber_mensagem(fd, &resposta) == 0 &&
+        resposta.header.tipo_mensagem == MSG_ACK &&
+        separar_provedores(resposta.payload, resposta.header.tamanho_payload, &tamanho_meta,
+                           providers, &n_providers) == 0 &&
+        metadata_deserialize(resposta.payload, tamanho_meta, &meta) == METADATA_OK)
+    {
+        achou = 1;
+    }
+    liberar_mensagem(&resposta);
+    liberar_mensagem(&msg);
+    close(fd);
+    if (!achou)
+    {
+        printf("Erro: %s nao encontrado\n", nome);
+        return 1;
+    }
+
+    /* 2) STORE com Status = REMOVED */
+    meta.status = METADATA_STATUS_REMOVED;
+    if (metadata_serialize(&meta, &payload, &tam) != METADATA_OK)
+    {
+        metadata_free(&meta);
+        return 1;
+    }
+    fd = conectar_no_servidor(host, porta);
+    if (fd >= 0)
+    {
+        memset(&msg, 0, sizeof(msg));
+        memset(&resposta, 0, sizeof(resposta));
+        msg.header.versao_protocolo = 1;
+        msg.header.tipo_mensagem = MSG_STORE;
+        memcpy(msg.header.no_origem, peer->node_id, NODE_ID_LEN);
+        msg.header.tamanho_payload = tam;
+        msg.payload = payload;
+        payload = NULL;
+        if (enviar_mensagem(fd, &msg) == 0 && receber_mensagem(fd, &resposta) == 0 &&
+            resposta.header.tipo_mensagem == MSG_ACK)
+        {
+            printf("Documento %s marcado como REMOVED (remocao logica)\n", meta.filename);
+            rc = 0;
+        }
+        else
+        {
+            printf("Erro: super peer respondeu %s ao STORE de remocao\n",
+                   nome_do_tipo(resposta.header.tipo_mensagem));
+        }
+        liberar_mensagem(&resposta);
+        liberar_mensagem(&msg);
+        close(fd);
+    }
+    else
+    {
+        printf("Erro: nao foi possivel conectar ao Super Peer %s:%d\n", host, porta);
+    }
+    free(payload);
+    metadata_free(&meta);
     return rc;
 }
 
@@ -743,6 +849,7 @@ static void sessao_ajuda(void)
 {
     printf("Comandos:\n"
            "  upload <arquivo>            download <nome> [saida]\n"
+           "  delete <nome>               (remocao logica: Status = REMOVED)\n"
            "  lookup <nome|object-id>     state [host porta]\n"
            "  ping|join|leave [host porta]\n"
            "  sleep <segundos>            help | quit\n");
@@ -819,6 +926,10 @@ static int executar_sessao(Node *peer, const char *host, int porta, FILE *entrad
             else
                 rc = executar_comando(peer, host, porta, "download", "", args[1],
                                       argc_cmd > 2 ? args[2] : "", "");
+        }
+        else if (strcmp(args[0], "delete") == 0)
+        {
+            rc = executar_delete(peer, host, porta, argc_cmd > 1 ? args[1] : "");
         }
         else if (strcmp(args[0], "lookup") == 0)
         {
@@ -974,6 +1085,11 @@ int main(int argc, char *argv[])
             snprintf(cmd, sizeof(cmd), "download");
             snprintf(name_param, sizeof(name_param), "%s", argv[optind + 1]);
         }
+        else if (strcmp(argv[optind], "delete") == 0 && optind + 1 < argc)
+        {
+            snprintf(cmd, sizeof(cmd), "delete");
+            snprintf(name_param, sizeof(name_param), "%s", argv[optind + 1]);
+        }
         else if (strcmp(argv[optind], "join") == 0)
         {
             snprintf(cmd, sizeof(cmd), "join");
@@ -1043,6 +1159,8 @@ int main(int argc, char *argv[])
         return interativo ? 0 : rc;
     }
 
+    if (strcmp(cmd, "delete") == 0)
+        return executar_delete(&peer, host, porta, name_param);
     return executar_comando(&peer, host, porta, cmd, file_param, name_param,
                             output_param, object_id_param);
 }

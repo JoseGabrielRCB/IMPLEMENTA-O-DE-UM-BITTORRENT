@@ -7,9 +7,11 @@
 #include "metadata.h"
 #include "chord.h"
 
-/* Capacidade do log em memoria e codigo da operacao PUT */
+/* Capacidade do log em memoria e codigos das operacoes (Secao 12.3).
+ * PUT registra ou atualiza um documento; DELETE e a remocao logica (Status = REMOVED). */
 #define SMR_LOG_MAX 1024
 #define SMR_OP_PUT 1
+#define SMR_OP_DELETE 2
 
 /* Parte fixa do payload do LOG_APPEND / PREPARE, antes do metadado:
  * log_index | transaction_id | operation | object_id | timestamp | version | checksum | meta_len */
@@ -29,7 +31,7 @@ typedef enum {
 typedef struct {
     uint64_t log_index;          /* sequencia global, comeca em 1 */
     uint8_t  transaction_id[16];
-    uint8_t  operation;          /* SMR_OP_PUT = 1 */
+    uint8_t  operation;          /* SMR_OP_PUT = 1, SMR_OP_DELETE = 2 */
     uint8_t  object_id[32];
     uint64_t timestamp;          /* relogio logico de Lamport */
     uint64_t version;            /* versao do metadado apos aplicar */
@@ -43,7 +45,9 @@ int smr_start(const Node *no);
 uint64_t smr_last_applied(void);
 
 /* No coordenador: executa Two-Phase Commit (PREPARE -> YES/NO -> COMMIT/ABORT)
- * com todos os Super Peers ALIVE e aplica a entrada PUT em ordem total.
+ * com todos os Super Peers ALIVE e aplica a entrada em ordem total. A operacao e
+ * DELETE quando o metadado vem com Status = REMOVED, e PUT nos outros casos.
+ * ReplicaPeers recebe o coordenador e os participantes do 2PC.
  * Retorna 0 se confirmou (COMMIT) ou -1 se abortou (ABORT). */
 int smr_put(const FileMetadata *meta, const uint8_t provider[NODE_ID_LEN]);
 

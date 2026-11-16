@@ -114,6 +114,8 @@ Repete os itens de verificação da especificação em sequência, sobre 3 Super
 
 Resultado: **29 PASS, 0 FAIL**. A bateria também passa com os binários compilados com `-fsanitize=address,undefined`, sem nenhum relatório do sanitizer.
 
+> **Atenção à verificação "ELECTION enviada aos nós de maior prioridade".** Ela depende de qual Super Peer percebe primeiro a queda do coordenador, e às vezes falha (28/29), **com ou sem as mudanças da Seção 8**. Ver a Seção 8.4.
+
 ### 5.2 Baterias anteriores (regressão)
 
 | Bateria | Resultado |
@@ -148,3 +150,64 @@ Resultado: **29 PASS, 0 FAIL**. A bateria também passa com os binários compila
 | `[C-16]` RNF-010 (eleição < 5 s) | Medida a partir do envio da mensagem `ELECTION`. A espera por OK/COORDINATOR é limitada a `BULLY_WAIT_SEC = 5`. Da falha até a eleição soma-se o timeout de 15 s do heartbeat. |
 | `[C-18]` 2PC bloqueante | Implementado como especificado. Se o coordenador cair depois do PREPARE e antes da decisão, os participantes ficam em READY até um novo coordenador ser eleito; a limitação está documentada em `docs/cp5`. |
 | Réplica dos chunks | Os chunks são replicados para todos os Super Peers vivos no momento do upload (com 3 Super Peers, isso equivale ao `ReplicationFactor = 3` da Seção 8.6). Um Super Peer que estava fora no upload recebe os metadados pelo IST, mas não os chunks; o cliente então busca o chunk em outra réplica (Seção 11.6). |
+
+---
+
+## 8. Mudanças depois da bateria final (Debugging e Integração)
+
+Estas mudanças vieram de levar o sistema para várias máquinas (o harness distribuído) e de conferir o código contra o enunciado.
+
+### 8.1 Correções
+
+| # | Problema | Causa | Correção |
+|---|---|---|---|
+| 6 | **Não funcionava em várias máquinas.** Chord, Gossip e Bully anunciavam `127.0.0.1` aos outros nós. | O IP do Super Peer era fixo (`IP_PADRAO`). | O Super Peer lê o próprio IP da linha do roster que tem a sua porta (`ler_linha_csv`). Com o roster local (127.0.0.1) nada muda. |
+| 7 | **O antigo coordenador retomava a coordenação ao voltar** e, durante essa eleição, recusava STORE (`STORE: sem coordenador`). | A eleição de partida (`bully_loop`) rodava sempre, mesmo com um coordenador vivo. Contraria a Seção 15.7. | Com o sistema em operação (algum `LOG` aplicado) e um coordenador vivo, o nó entra como FOLLOWER (`Bully: coordenador X ja conhecido e sistema em operacao ... (Secao 15.7)`). Na montagem do cluster (LOG 0), a eleição de partida continua: o maior NodeID vence, como no Checkpoint 4. |
+| 8 | **O nó que voltava demorava a saber quem era o coordenador** (até 5 s), e às vezes decidia a eleição sem saber. | O coordenador só anunciava a cada 5 s e só para quem já via como vivo. | Ao entrar, o nó avisa logo os membros que o bootstrap passou (`Gossip: entrada anunciada a N membros`), e o coordenador anuncia `COORDINATOR` assim que vê um membro novo ou de volta (UC-01). |
+| 9 | **Metadado com 7 dos 13 campos** da Seção 8.3 (`[C-05]`). | O `FileMetadata` era o mínimo do Checkpoint 2. | Acrescentados `Compression`, `UploadDate`, `LastAccess`, `DownloadCounter`, `Status` e `ReplicaPeers` (serializados no STORE, no LOOKUP e no log). `./bin/peer --cmd lookup --name X` mostra todos. |
+| 10 | **Não havia remoção de documento** (ator Usuário, Seção 8.4, operação `DELETE` da Seção 12.3, exemplo do Checkpoint 4). | Só existia `PUT`. | `delete <nome>` no cliente: busca o metadado, marca `Status = REMOVED` e envia um STORE. O coordenador registra `DELETE` no log via 2PC e cada Super Peer marca o registro, com `Version++`. LOOKUP e download passam a responder "não encontrado"; um novo upload do mesmo arquivo reativa o registro. Um nó que estava fora recebe o `DELETE` pelo IST. |
+
+### 8.2 Cliente com sessão (`--interactive` / `--batch`)
+
+O `bin/client` continua aceitando um comando por execução (`--cmd ...`) e ganhou uma sessão com um NodeID só, usada pelo harness distribuído:
+
+```text
+bin/client --interactive --host <SP> --port <porta>     # comandos pela stdin
+bin/client --batch arquivo.cmds                          # comandos de um arquivo
+upload <arq> | download <nome> [saida] | lookup <nome|ObjectID> | delete <nome>
+state | ping | join | leave [host porta] | sleep <s> | help | quit
+```
+
+Cada comando termina com `[done N rc=R]`. O código de saída do modo `--cmd` agora é diferente de 0 quando a operação falha (antes era sempre 0).
+
+### 8.3 Decisões de projeto acrescentadas (`[P-02]`)
+
+| Ponto | Decisão |
+|---|---|
+| Disparo da eleição | O Bully elege quando o coordenador fica **SUSPECT** (timeout de 15 s), apoiado na Seção 5.3 ("após o timeout... Bully Election é iniciado"). As Seções 7.7 e 15.8 sugerem esperar a confirmação (FAILED, 30 s); optamos pela recuperação mais rápida. |
+| Volta de um nó (15.7) | "Sistema em operação" = algum `LOG` aplicado depois do IST. Sem operações (montagem), a eleição de partida é a do Bully clássico. |
+| `ReplicaPeers` | Os Super Peers que aplicam a entrada: o coordenador e os participantes ALIVE do 2PC. |
+| `LastAccess` e `DownloadCounter` | Estatísticas **locais** de cada Super Peer (RF-024), atualizadas a cada LOOKUP que encontra o arquivo (todo download começa por um LOOKUP). Não passam pelo SMR. |
+| Remoção | Lógica (Seção 8.4): o registro fica com `Status = REMOVED`; os chunks continuam guardados. Reaproveita o `STORE`, sem criar mensagem fora da Seção 5.1. |
+| Réplica dos chunks | Para todos os Super Peers vivos (ver Seção 7). O fator de replicação da Seção 8.6 não é configurável. |
+
+### 8.4 A verificação instável do `tests/c6`
+
+A verificação "Bully: ELECTION enviada aos nós de maior prioridade" procura a linha `ELECTION ->` depois que o coordenador SP1 cai. Sobram SP2 (maior NodeID) e SP3:
+
+- se o **SP3** percebe a queda primeiro, manda `ELECTION -> SP2`, recebe OK e o SP2 vence → a verificação passa;
+- se o **SP2** percebe primeiro, não há nó maior vivo a quem mandar `ELECTION`: ele vence direto (`detect failure` → `start election` → `highest NodeID wins: SP2`) → a verificação falha.
+
+As duas sequências são o Bully correto, e o resultado é o mesmo (o maior nó vivo assume; as outras verificações do Bully passam). Quem percebe primeiro depende da fração de segundo em que cada processo roda o ciclo do Gossip e do Bully, isto é, do instante em que cada um subiu. Medimos: o código anterior às mudanças desta seção também falha quando a corrida vira (3 de 3 ensaios com o teste iniciado na mesma fração de segundo), e o código atual passou 3 de 3 no `c6`. Se só essa verificação falhar, basta rodar a bateria de novo.
+
+### 8.5 Harness distribuído e interface (ferramentas de teste)
+
+`script/bittorrent-project/tests/cluster/` sobe Super Peers e clientes em várias máquinas por ssh, a partir de um `cluster.conf`, e roda os cenários `smoke`, `final` (uma fase por item do CP6, incluindo a remoção lógica) e `carga`. O `README.md` dessa pasta explica o uso no laboratório. A interface gráfica (`gui/`, tkinter + matplotlib) é só uma ferramenta de operação e visualização do harness: a interface gráfica está **fora do escopo** do sistema (Seção 1.3).
+
+### 8.6 Limitações conhecidas
+
+- O IST transfere os logs pendentes; não há snapshot/checkpoint (Seções 12.4 e 13.1).
+- A compressão dos chunks é sequencial; o download é paralelo (uma thread por chunk), mas não há o pool de compressão da Seção 10.5.
+- O cache LFU é uma região só (a Seção 9.4 sugere quatro).
+- Um Super Peer que estava fora no upload recebe o metadado pelo IST, mas não os chunks (o cliente busca o chunk em outra réplica).
+- O 2PC é bloqueante (`[C-18]`).

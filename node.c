@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <openssl/sha.h>
 
@@ -388,6 +389,14 @@ int metadata_copy(FileMetadata *dest, const FileMetadata *src)
     dest->size = src->size;
     dest->version = src->version;
     memcpy(dest->owner, src->owner, METADATA_ID_LEN);
+    dest->compression = src->compression;
+    dest->upload_date = src->upload_date;
+    dest->last_access = src->last_access;
+    dest->download_counter = src->download_counter;
+    dest->status = src->status;
+    dest->replica_count = src->replica_count > METADATA_REPLICA_MAX ? METADATA_REPLICA_MAX
+                                                                    : src->replica_count;
+    memcpy(dest->replica_peers, src->replica_peers, sizeof(dest->replica_peers));
 
     for (i = 0; i < src->chunk_count; i++) {
         if (src->chunk_hashes[i] == NULL) {
@@ -432,6 +441,59 @@ void metadata_print(const FileMetadata *meta)
         }
         printf("\n");
     }
+}
+
+/* Nome do status do metadado */
+const char *metadata_status_name(uint8_t status)
+{
+    switch (status) {
+    case METADATA_STATUS_ACTIVE:
+        return "ACTIVE";
+    case METADATA_STATUS_REPLICATING:
+        return "REPLICATING";
+    case METADATA_STATUS_REMOVED:
+        return "REMOVED";
+    default:
+        return "?";
+    }
+}
+
+/* Data em texto local, ou "-" se zero */
+static void metadata_print_time(const char *rotulo, uint64_t segundos)
+{
+    char texto[32] = "-";
+    time_t t = (time_t)segundos;
+    struct tm quando;
+
+    if (segundos != 0 && localtime_r(&t, &quando) != NULL) {
+        strftime(texto, sizeof(texto), "%Y-%m-%d %H:%M:%S", &quando);
+    }
+    printf("%s: %s\n", rotulo, texto);
+}
+
+/* Imprime os demais campos da Secao 8.3 */
+void metadata_print_details(const FileMetadata *meta)
+{
+    uint8_t i;
+
+    if (meta == NULL) {
+        return;
+    }
+    printf("Version: %llu\n", (unsigned long long)meta->version);
+    printf("Status: %s\n", metadata_status_name(meta->status));
+    printf("Compression: %s\n", meta->compression == METADATA_COMPRESSION_LZ4 ? "LZ4" : "none");
+    printf("OwnerPeer: ");
+    metadata_print_hex(meta->owner, 8);
+    printf("...\n");
+    metadata_print_time("UploadDate", meta->upload_date);
+    metadata_print_time("LastAccess", meta->last_access);
+    printf("DownloadCounter: %llu\n", (unsigned long long)meta->download_counter);
+    printf("ReplicaPeers: %u", meta->replica_count);
+    for (i = 0; i < meta->replica_count && i < METADATA_REPLICA_MAX; i++) {
+        printf("%s", i == 0 ? " (" : ", ");
+        metadata_print_hex(meta->replica_peers[i], 6);
+    }
+    printf("%s\n", meta->replica_count > 0 ? ")" : "");
 }
 
 /* Calcula o ObjectID a partir do arquivo inteiro */
@@ -525,9 +587,13 @@ int metadata_serialize(const FileMetadata *meta, uint8_t **buffer, uint32_t *siz
     }
     nome_len16 = (uint16_t)nome_len;
 
+    if (meta->replica_count > METADATA_REPLICA_MAX) {
+        return METADATA_ERR_INVALID;
+    }
     total = METADATA_ID_LEN + sizeof(uint16_t) + nome_len + sizeof(uint64_t)
             + sizeof(uint32_t) + (uint64_t)meta->chunk_count * METADATA_HASH_LEN
-            + sizeof(uint64_t) + METADATA_ID_LEN;
+            + sizeof(uint64_t) + METADATA_ID_LEN
+            + METADATA_EXTRA_LEN + (uint64_t)meta->replica_count * METADATA_ID_LEN;
     if (total > UINT32_MAX) {
         return METADATA_ERR_INVALID;
     }
@@ -560,6 +626,20 @@ int metadata_serialize(const FileMetadata *meta, uint8_t **buffer, uint32_t *siz
     memcpy(saida + pos, &meta->version, sizeof(uint64_t));
     pos += sizeof(uint64_t);
     memcpy(saida + pos, meta->owner, METADATA_ID_LEN);
+    pos += METADATA_ID_LEN;
+    saida[pos++] = meta->compression;
+    memcpy(saida + pos, &meta->upload_date, sizeof(uint64_t));
+    pos += sizeof(uint64_t);
+    memcpy(saida + pos, &meta->last_access, sizeof(uint64_t));
+    pos += sizeof(uint64_t);
+    memcpy(saida + pos, &meta->download_counter, sizeof(uint64_t));
+    pos += sizeof(uint64_t);
+    saida[pos++] = meta->status;
+    saida[pos++] = meta->replica_count;
+    for (i = 0; i < meta->replica_count; i++) {
+        memcpy(saida + pos, meta->replica_peers[i], METADATA_ID_LEN);
+        pos += METADATA_ID_LEN;
+    }
 
     *buffer = saida;
     *size = (uint32_t)total;
@@ -615,10 +695,10 @@ int metadata_deserialize(const uint8_t *buffer, uint32_t size, FileMetadata *met
         return METADATA_ERR_INVALID;
     }
 
-    /* o que sobra tem de ser exatamente os hashes, a versao e o dono */
+    /* o que sobra: hashes, versao, dono, campos fixos e ao menos o replica_count */
     restante = (uint64_t)size - pos;
-    if (restante != (uint64_t)chunk_count * METADATA_HASH_LEN
-                    + sizeof(uint64_t) + METADATA_ID_LEN) {
+    if (restante < (uint64_t)chunk_count * METADATA_HASH_LEN
+                   + sizeof(uint64_t) + METADATA_ID_LEN + METADATA_EXTRA_LEN) {
         return METADATA_ERR_INVALID;
     }
 
@@ -637,9 +717,21 @@ int metadata_deserialize(const uint8_t *buffer, uint32_t size, FileMetadata *met
         }
     }
     if (metadata_read(buffer, size, &pos, &meta->version, sizeof(uint64_t)) != 0 ||
-        metadata_read(buffer, size, &pos, meta->owner, METADATA_ID_LEN) != 0) {
+        metadata_read(buffer, size, &pos, meta->owner, METADATA_ID_LEN) != 0 ||
+        metadata_read(buffer, size, &pos, &meta->compression, 1) != 0 ||
+        metadata_read(buffer, size, &pos, &meta->upload_date, sizeof(uint64_t)) != 0 ||
+        metadata_read(buffer, size, &pos, &meta->last_access, sizeof(uint64_t)) != 0 ||
+        metadata_read(buffer, size, &pos, &meta->download_counter, sizeof(uint64_t)) != 0 ||
+        metadata_read(buffer, size, &pos, &meta->status, 1) != 0 ||
+        metadata_read(buffer, size, &pos, &meta->replica_count, 1) != 0 ||
+        meta->replica_count > METADATA_REPLICA_MAX ||
+        (uint64_t)size - pos != (uint64_t)meta->replica_count * METADATA_ID_LEN) {
         metadata_free(meta);
         return METADATA_ERR_INVALID;
+    }
+    for (i = 0; i < meta->replica_count; i++) {
+        memcpy(meta->replica_peers[i], buffer + pos, METADATA_ID_LEN);
+        pos += METADATA_ID_LEN;
     }
     return METADATA_OK;
 }
@@ -761,8 +853,22 @@ int metadata_table_insert(const FileMetadata *meta)
         return METADATA_ERR_INVALID;
     }
 
-    if (metadata_find_id_index(meta->object_id) >= 0) {
-        printf("STORE: ObjectID ja registrado, tabela inalterada\n");
+    livre_id = metadata_find_id_index(meta->object_id);
+    if (livre_id >= 0) {
+        FileMetadata *atual = &metadata_slots[livre_id].meta;
+        if (atual->status == meta->status) {
+            printf("STORE: ObjectID ja registrado, tabela inalterada\n");
+        } else {
+            /* remocao logica (Secao 8.4) ou reativacao: muda o status e faz Version++ */
+            atual->status = meta->status;
+            atual->version++;
+            atual->replica_count = meta->replica_count;
+            memcpy(atual->replica_peers, meta->replica_peers, sizeof(atual->replica_peers));
+            printf("STORE: arquivo %s %s (version=%llu)\n", atual->filename,
+                   atual->status == METADATA_STATUS_REMOVED ? "marcado como REMOVED (remocao logica)"
+                                                            : "reativado",
+                   (unsigned long long)atual->version);
+        }
         pthread_mutex_unlock(&metadata_mutex);
         return METADATA_OK;
     }
@@ -824,7 +930,7 @@ int metadata_table_find_by_id(const uint8_t object_id[METADATA_ID_LEN], FileMeta
     }
 
     indice = metadata_find_id_index(object_id);
-    if (indice < 0) {
+    if (indice < 0 || metadata_slots[indice].meta.status == METADATA_STATUS_REMOVED) {
         resultado = METADATA_ERR_NOT_FOUND;
     } else {
         resultado = metadata_copy(out, &metadata_slots[indice].meta);
@@ -853,7 +959,7 @@ int metadata_table_find_by_name(const char *filename, FileMetadata *out)
         indice = metadata_find_id_index(metadata_names[nome].object_id);
     }
 
-    if (indice < 0) {
+    if (indice < 0 || metadata_slots[indice].meta.status == METADATA_STATUS_REMOVED) {
         resultado = METADATA_ERR_NOT_FOUND;
     } else {
         resultado = metadata_copy(out, &metadata_slots[indice].meta);
@@ -861,6 +967,32 @@ int metadata_table_find_by_name(const char *filename, FileMetadata *out)
 
     pthread_mutex_unlock(&metadata_mutex);
     return resultado;
+}
+
+/* Estatistica local de acesso: LastAccess = agora e DownloadCounter++ */
+int metadata_table_touch(const uint8_t object_id[METADATA_ID_LEN], uint64_t *last_access,
+                         uint64_t *downloads)
+{
+    int indice;
+
+    if (object_id == NULL || pthread_mutex_lock(&metadata_mutex) != 0) {
+        return METADATA_ERR_INVALID;
+    }
+    indice = metadata_find_id_index(object_id);
+    if (indice < 0) {
+        pthread_mutex_unlock(&metadata_mutex);
+        return METADATA_ERR_NOT_FOUND;
+    }
+    metadata_slots[indice].meta.last_access = (uint64_t)time(NULL);
+    metadata_slots[indice].meta.download_counter++;
+    if (last_access != NULL) {
+        *last_access = metadata_slots[indice].meta.last_access;
+    }
+    if (downloads != NULL) {
+        *downloads = metadata_slots[indice].meta.download_counter;
+    }
+    pthread_mutex_unlock(&metadata_mutex);
+    return METADATA_OK;
 }
 
 /* Imprime todos os metadados registrados */
