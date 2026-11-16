@@ -202,7 +202,7 @@ As duas sequências são o Bully correto, e o resultado é o mesmo (o maior nó 
 
 ### 8.5 Harness distribuído e interface (ferramentas de teste)
 
-`script/bittorrent-project/tests/cluster/` sobe Super Peers e clientes em várias máquinas por ssh, a partir de um `cluster.conf`, e roda os cenários `smoke`, `final` (uma fase por item do CP6, incluindo a remoção lógica) e `carga`. O `README.md` dessa pasta explica o uso no laboratório. A interface gráfica (`gui/`, tkinter + matplotlib) é só uma ferramenta de operação e visualização do harness: a interface gráfica está **fora do escopo** do sistema (Seção 1.3).
+`script/bittorrent-project/tests/cluster/` sobe Super Peers e clientes em várias máquinas por ssh, a partir de um `cluster.conf`, e roda os cenários `smoke`, `final` (uma fase por item do CP6, incluindo a remoção lógica) e `carga`. O `README.md` dessa pasta explica o uso no laboratório. A interface gráfica (`gui/`, tkinter + matplotlib) é só uma ferramenta de operação e visualização do harness: a interface gráfica está **fora do escopo** do sistema (Seção 1.3). O uso da interface, uma bateria de testes passo a passo e o roteiro de demonstração do Aluno 2 estão em [`Guia_Interface_e_Demonstracao.md`](Guia_Interface_e_Demonstracao.md).
 
 ### 8.6 Limitações conhecidas
 

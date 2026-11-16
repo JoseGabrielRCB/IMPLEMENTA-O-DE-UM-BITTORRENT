@@ -179,6 +179,9 @@ e `python3-pip` (`sudo apt install`) e de tela gráfica (no WSL, o WSLg; por ssh
 | Cenários | Roda `scenarios/*.sh` (com `CLUSTER_KEEP` e `WAVE`) e mostra `out/relatorio.md` |
 | Logs | Acompanha o log espelhado de um processo, com filtro por categoria ou regex, e marca a troca de vida |
 
+Guia completo, com testes passo a passo e o roteiro de demonstração do Aluno 2:
+[`docs/cp6/Guia_Interface_e_Demonstracao.md`](../../../../docs/cp6/Guia_Interface_e_Demonstracao.md).
+
 A interface não tem lógica de teste própria: os botões chamam o `cluster.sh`/`run.sh`
 e os gráficos leem os logs em `logs/`. "Consultar processos vivos (ssh)" faz um
 `cluster.sh status` a cada atualização; desligado, os gráficos usam só os logs.
